@@ -26,13 +26,13 @@ class ParallelHeatSolver : public BaseHeatSolver
     // - Constructor which passes SimulationProperties and MaterialProperties
     //   to the base class. (see below)
     // - Implementation of RunSolver method. (see below)
-    // 
-    // It is strongly encouraged to define methods and member variables to improve 
+    //
+    // It is strongly encouraged to define methods and member variables to improve
     // readability of your code!
     //
     //                             *** END: NOTE ***
     //============================================================================//
-    
+
 public:
     /**
      * @brief Constructor - Initializes the solver. This should include things like:
@@ -56,19 +56,23 @@ public:
      *                  NOTE: The vector is allocated (and should be used) *ONLY*
      *                        by master process (rank 0 in MPI_COMM_WORLD)!
      */
-    virtual void RunSolver(std::vector<float, AlignedAllocator<float> > &outResult);
+    virtual void RunSolver(std::vector<float, AlignedAllocator<float>> &outResult);
 
-    void printMatrix(float* matrix, int nRows, int nCols, int rank);
+    void printMatrix(float *matrix, int nRows, int nCols, int rank);
     float ComputeMiddleColAvgTemp(const float *data) const;
 
-    void mpiPrintf(int who, const char* __restrict__ format, ...);
+    void mpiPrintf(int who, const char *__restrict__ format, ...);
     void mpiFlush();
 
 protected:
-    int m_rank;     ///< Process rank in global (MPI_COMM_WORLD) communicator.
-    int m_size;     ///< Total number of processes in MPI_COMM_WORLD.
+    int m_rank; ///< Process rank in global (MPI_COMM_WORLD) communicator.
+    int m_size; ///< Total number of processes in MPI_COMM_WORLD.
+    int globalCols; ///< Domain decomposition in X axis.
+    int globalRows; ///< Domain decomposition in Y axis.
 
-    std::vector<float, AlignedAllocator<float> > m_tempArray;
+    std::vector<float, AlignedAllocator<float>> m_tempArray;
+    AutoHandle<hid_t> m_fileHandle;
+    void AddPaddingToArray(float *data, int size, int padding, float *newData);
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
