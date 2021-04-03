@@ -10,6 +10,7 @@
 #include "parallel_heat_solver.h"
 
 #include <unistd.h>
+#include <math.h>
 
 using namespace std;
 
@@ -332,7 +333,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                                      m_materialProperties.GetCoolerTemp());
                     }
                 }
-                printMatrix(newTile, blockCols, blockRows, m_rank);
+                //printMatrix(newTile, blockCols, blockRows, m_rank);
             }
             if (!isRightRank)
             {
@@ -387,8 +388,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                                      m_materialProperties.GetCoolerTemp());
                     }
                 }
-
-                printMatrix(newTile, blockCols, blockRows, m_rank);
             }
             // Send counted values
             if (!isLeftRank)
@@ -411,6 +410,10 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             {
                 request[1] = MPI_REQUEST_NULL;
             }
+            if (!isBottomRank)
+            {
+            }
+
             // // Count inner block
             for (unsigned int i = 4; i < blockCols - 4; ++i)
             {
@@ -427,16 +430,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             }
 
             MPI_Waitall(2, request, status);
-            float pole[4] = {1,
-                             2,
-                             3,
-                             4};
+
             //int middleRank = n / (2 * tileCols);
-            float *aaaa = new float[tileRows];
-            float localSum = 0.0;
-            float temperatureSum = 0.0;
+            float localSum = 0.0f;
+            float temperatureSum = 0.0f;
             bool evenColumns = globalCols % 2 == 0;
-            cout << "evenColumns: " << evenColumns << endl;
             for (int i = 2; i < tileRows + 2; i++)
             {
                 if (evenColumns)
@@ -446,7 +444,9 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                 }
                 else
                 {
-                    localSum += newTile[2 * blockRows + ((tileCols / 2 - 1) * blockRows) + i];
+                    // Compute the middle row
+                    int middleRow = std::ceil(tileCols / 2.0) - 1;
+                    localSum += newTile[2 * blockRows + (middleRow * blockRows) + i];
                 }
             }
             if (MPI_COL_COMM != MPI_COMM_NULL)
@@ -456,6 +456,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             int middleRank = globalCols / 2;
             if (middleRank == m_rank)
             {
+                printMatrix(newTile, blockCols, blockRows, m_rank);
                 middleColAvgTemp = temperatureSum / (tileRows * mpiGetCommSize(MPI_COL_COMM));
                 cout << m_rank << ": middle temparature is: " << temperatureSum << ", " << middleColAvgTemp << endl;
                 MPI_Send(&middleColAvgTemp, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
