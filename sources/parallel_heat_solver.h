@@ -79,6 +79,8 @@ protected:
     AutoHandle<hid_t> m_fileHandle;
     void AddPaddingToArray(float *data, int size, int padding, float *newData);
     void AddPaddingToIntArray(int *data, int size, int padding, int *newData);
+    int mpiGetCommRank(const MPI_Comm &comm);
+    int mpiGetCommSize(const MPI_Comm &comm);
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
