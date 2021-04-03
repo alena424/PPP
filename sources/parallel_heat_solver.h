@@ -65,14 +65,20 @@ public:
     void mpiFlush();
 
 protected:
-    int m_rank; ///< Process rank in global (MPI_COMM_WORLD) communicator.
-    int m_size; ///< Total number of processes in MPI_COMM_WORLD.
+    int m_rank;     ///< Process rank in global (MPI_COMM_WORLD) communicator.
+    int m_size;     ///< Total number of processes in MPI_COMM_WORLD.
     int globalCols; ///< Domain decomposition in X axis.
     int globalRows; ///< Domain decomposition in Y axis.
 
+    const unsigned int padding = 2;
+
     std::vector<float, AlignedAllocator<float>> m_tempArray;
+    std::vector<float, AlignedAllocator<float>> m_domainParams;
+    std::vector<int, AlignedAllocator<int>> m_domainMap;
+
     AutoHandle<hid_t> m_fileHandle;
     void AddPaddingToArray(float *data, int size, int padding, float *newData);
+    void AddPaddingToIntArray(int *data, int size, int padding, int *newData);
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
