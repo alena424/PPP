@@ -433,28 +433,42 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                              4};
             //int middleRank = n / (2 * tileCols);
             float *aaaa = new float[tileRows];
+            float localSum = 0.0;
+            float temperatureSum = 0.0;
+            bool evenColumns = globalCols % 2 == 0;
+            cout << "evenColumns: " << evenColumns << endl;
+            for (int i = 2; i < tileRows + 2; i++)
+            {
+                if (evenColumns)
+                {
+                    // Compute the first row
+                    localSum += newTile[2 * blockRows + i];
+                }
+                else
+                {
+                    localSum += newTile[2 * blockRows + ((tileCols / 2 - 1) * blockRows) + i];
+                }
+            }
             if (MPI_COL_COMM != MPI_COMM_NULL)
             {
-                MPI_Reduce(&newTile[2 * blockRows + 2], aaaa, tileRows, MPI_FLOAT, MPI_SUM, 0, MPI_COL_COMM);
+                MPI_Reduce(&localSum, &temperatureSum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COL_COMM);
             }
-            if (mpiGetCommRank(MPI_COL_COMM) == 0)
+            int middleRank = globalCols / 2;
+            if (middleRank == m_rank)
             {
-                cout << m_rank << ": middle temparature is: " << aaaa[0] << ", " << aaaa[1] << ", " << aaaa[2] << endl;
+                middleColAvgTemp = temperatureSum / (tileRows * mpiGetCommSize(MPI_COL_COMM));
+                cout << m_rank << ": middle temparature is: " << temperatureSum << ", " << middleColAvgTemp << endl;
+                MPI_Send(&middleColAvgTemp, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
             }
-            // if (m_rank == middleRank)
-            // {
-            //     // Use first row
-            //     middleColAvgTemp = ComputeMiddleColAvgTemp(&newTile[2 * blockRows]);
-            //     MPI_Send(&middleColAvgTemp, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-            // }
+
             // // Swap source and destination buffers
             std::swap(tile, newTile);
 
-            // if (m_rank == 0)
-            // {
-            //     MPI_Recv(&middleColAvgTemp, 1, MPI_FLOAT, middleRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //     PrintProgressReport(iter, middleColAvgTemp);
-            // }
+            if (m_rank == 0)
+            {
+                MPI_Recv(&middleColAvgTemp, 1, MPI_FLOAT, middleRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                PrintProgressReport(iter, middleColAvgTemp);
+            }
             //printMatrix(tile, blockCols, blockRows, m_rank);
         }
     }
