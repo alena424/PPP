@@ -323,11 +323,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     int endTB = blockCols - 2;
     if (isBottomRank)
     {
-        startLF = 4;
+        endLF = blockRows - 4;
     }
     if (isTopRank)
     {
-        endLF = blockRows - 4;
+        startLF = 4;
     }
     // mozna bude potreba prehodit
     if (isLeftRank)
