@@ -156,8 +156,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     MPI_Datatype MPI_COL_MAT;
     MPI_Datatype MPI_COL_MAT_RES;
 
-    MPI_Datatype MPI_COL_TILE;
-    MPI_Datatype MPI_COL_TILE_RES;
+    MPI_Datatype MPI_COL_TILE_N;
+    MPI_Datatype MPI_COL_TILE_N_RES;
 
     MPI_Datatype MPI_ROW_TILE;
     MPI_Datatype MPI_ROW_TILE_RES;
@@ -166,6 +166,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     MPI_Datatype MPI_ROW_MAP;
 
     MPI_Datatype MPI_COL_MAP;
+
+    MPI_Datatype MPI_COL_TILE;
     MPI_Datatype MPI_COL_MAP_RES;
 
     MPI_Datatype MPI_GLOBAL_TILE;
@@ -231,19 +233,24 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         MPI_Type_create_resized(MPI_COL_MAP, 0, 1 * sizeof(int), &MPI_COL_MAP_RES);
         MPI_Type_commit(&MPI_COL_MAP_RES);
 
-        MPI_Type_vector(tileRows, 1, n, MPI_FLOAT, &MPI_COL_TILE);
-        MPI_Type_commit(&MPI_COL_TILE);
-        MPI_Type_create_resized(MPI_COL_TILE, 0, 1 * sizeof(float), &MPI_COL_TILE_RES);
-        MPI_Type_commit(&MPI_COL_TILE_RES);
+        MPI_Type_vector(tileRows, 1, n, MPI_FLOAT, &MPI_COL_TILE_N);
+        MPI_Type_commit(&MPI_COL_TILE_N);
+        MPI_Type_create_resized(MPI_COL_TILE_N, 0, 1 * sizeof(float), &MPI_COL_TILE_N_RES);
+        MPI_Type_commit(&MPI_COL_TILE_N_RES);
     }
     // MPI_Type_vector(blockRows, blockRows, padding + blockCols, MPI_FLOAT, &MPI_ROW_TILE);
-    // MPI_Type_commit(&MPI_COL_TILE);
-    // MPI_Type_create_resized(MPI_COL_TILE, 0, 1 * sizeof(float), &MPI_COL_TILE_RES);
-    // MPI_Type_commit(&MPI_COL_TILE_RES);
+    // MPI_Type_commit(&MPI_COL_TILE_N);
+    // MPI_Type_create_resized(MPI_COL_TILE_N, 0, 1 * sizeof(float), &MPI_COL_TILE_N_RES);
+    // MPI_Type_commit(&MPI_COL_TILE_N_RES);
 
     mpiFlush();
     mpiPrintf(0, "---------------------------------------------------------------------\n");
     mpiFlush();
+
+    MPI_Type_vector(blockCols, 1, blockRows, MPI_FLOAT, &MPI_COL_TILE);
+    MPI_Type_commit(&MPI_COL_TILE);
+    // MPI_Type_create_resized(MPI_COL_MAT, 0, 1 * sizeof(float), &MPI_COL_TILE_N);
+    // MPI_Type_commit(&MPI_COL_MAT_RES);
 
     int *sizeTile = new int[2];
     sizeTile[0] = tileRows;
@@ -310,19 +317,42 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     float middleColAvgTemp = 0.0f;
     // Begin iterative simulation main loop
     bool debug = true;
+    int startLF = 2;
+    int endLF = blockRows - 2;
+    int startTB = 2;
+    int endTB = blockCols - 2;
+    if (isBottomRank)
+    {
+        startLF = 4;
+    }
+    if (isTopRank)
+    {
+        endLF = blockRows - 4;
+    }
+    // mozna bude potreba prehodit
+    if (isLeftRank)
+    {
+        startTB = 4;
+    }
+    if (isRightRank)
+    {
+        endTB = blockCols - 4;
+    }
+    cout << m_rank << ": startLF:" << startLF << ", endLF:" << endLF << " >> startTB: " << startTB << ", endTB:" << endTB << endl;
+
     if (debug)
     {
         for (size_t iter = 0; iter < m_simulationProperties.GetNumIterations(); ++iter)
         {
-            MPI_Request request[2];
-            MPI_Status status[2];
+            MPI_Request request[4];
+            MPI_Status status[4];
             // Count only borders
             // Count left border
             if (!isLeftRank)
             {
                 for (unsigned int i = 2; i < 4; ++i) // Start from second row
                 {
-                    for (unsigned int j = 2 + 2; j < blockRows - 2 - 2; ++j) //
+                    for (unsigned int j = startLF; j < endLF; ++j) //
                     {
                         ComputePoint(tile, newTile,
                                      domainParams,
@@ -340,7 +370,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                 //Count right border
                 for (unsigned int i = blockCols - 4; i < blockCols - 2; ++i)
                 {
-                    for (unsigned int j = 2 + 2; j < blockRows - 2 - 2; ++j)
+                    for (unsigned int j = startLF; j < endLF; ++j)
                     {
                         ComputePoint(tile, newTile,
                                      domainParams,
@@ -357,9 +387,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             if (!isBottomRank)
             {
                 // for (unsigned int j = 2 + 2; j < blockRows - 2 - 2; ++j)
-                for (unsigned int i = 2 + 2; i < blockRows - 2 - 2; ++i) // We need to go throught all the rows
+                //for (unsigned int i = startTB; i < endTB; ++i) // We need to go throught all the rows
+                for (unsigned int i = startTB; i < endTB; ++i)
                 {
-                    for (unsigned int j = 2 + 2; j < 4 + 2; ++j) //Columbs
+                    //for (unsigned int j = 2 + 2; j < 4 + 2; ++j) //Columbs
+                    for (unsigned int j = 4; j < 6; ++j) // We need to go throught all the rows
                     {
                         ComputePoint(tile, newTile,
                                      domainParams,
@@ -375,9 +407,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             if (!isTopRank)
             {
                 //Count top = right border
-                for (unsigned int i = 2 + 2; i < blockRows - 2 - 2; ++i)
+                //for (unsigned int i = startTB; i < endTB; ++i)
+                for (unsigned int i = startTB; i < endTB; ++i)
                 {
-                    for (unsigned int j = blockCols - 4 - 2; j < blockCols - 2 - 2; ++j)
+                    //for (unsigned int j = blockCols - 4 - 2; j < blockCols - 2 - 2; ++j)
+                    for (unsigned int j = blockRows - 4 - 2; j < blockRows - 2 - 2; ++j)
                     {
                         ComputePoint(tile, newTile,
                                      domainParams,
@@ -393,8 +427,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             if (!isLeftRank)
             {
                 // Send left border
-                MPI_Isend(&tile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, 0, MPI_COMM_WORLD, &request[0]);
-                MPI_Recv(tile, 2, MPI_ROW_BLOCK, m_rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Isend(&newTile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, 0, MPI_COMM_WORLD, &request[0]);
+                MPI_Recv(newTile, 2, MPI_ROW_BLOCK, m_rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
             else
             {
@@ -403,8 +437,10 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             if (!isRightRank)
             {
                 // Get right border
-                MPI_Isend(&tile[(blockCols - 4) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, MPI_COMM_WORLD, &request[1]);
-                MPI_Recv(&tile[(blockCols - 2) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                cout << m_rank << " Sending: " << m_rank + 1 << endl;
+                printMatrix(&newTile[(blockCols - 4) * blockRows], 4, blockRows, m_rank);
+                MPI_Isend(&newTile[(blockCols - 4) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, MPI_COMM_WORLD, &request[1]);
+                MPI_Recv(&newTile[(blockCols - 2) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
             else
             {
@@ -412,13 +448,33 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             }
             if (!isBottomRank)
             {
+                //cout << m_rank << " Sending: " << m_rank + globalCols << endl;
+                int bottomRankReceiver = m_rank + globalCols;
+                // Send/Receive left column (bottom tile)
+                MPI_Isend(&newTile[2], 2, MPI_COL_TILE, m_rank + globalCols, 0, MPI_COMM_WORLD, &request[2]);
+                MPI_Recv(newTile, 2, MPI_COL_TILE, m_rank + globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            else
+            {
+                request[2] = MPI_REQUEST_NULL;
+            }
+            if (!isTopRank)
+            {
+                int topRankReceiver = m_rank - globalCols;
+                MPI_Isend(&newTile[blockCols - 4], 2, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, &request[3]);
+                MPI_Recv(&newTile[blockCols - 2], 2, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            else
+            {
+                request[3] = MPI_REQUEST_NULL;
             }
 
             // // Count inner block
             for (unsigned int i = 4; i < blockCols - 4; ++i)
             {
-                for (unsigned int j = 2 + 2; j < blockRows - 2 - 2; ++j)
+                for (unsigned int j = 2 + 2; j < blockRows - 4; ++j)
                 {
+                    //cout << m_rank << ": counting " << i << ", " << j << endl;
                     ComputePoint(tile, newTile,
                                  domainParams,
                                  domainMap,
@@ -429,7 +485,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                 }
             }
 
-            MPI_Waitall(2, request, status);
+            MPI_Waitall(4, request, status);
 
             //int middleRank = n / (2 * tileCols);
             float localSum = 0.0f;
@@ -456,7 +512,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             int middleRank = globalCols / 2;
             if (middleRank == m_rank)
             {
-                printMatrix(newTile, blockCols, blockRows, m_rank);
+                //printMatrix(newTile, blockCols, blockRows, m_rank);
                 middleColAvgTemp = temperatureSum / (tileRows * mpiGetCommSize(MPI_COL_COMM));
                 cout << m_rank << ": middle temparature is: " << temperatureSum << ", " << middleColAvgTemp << endl;
                 MPI_Send(&middleColAvgTemp, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
@@ -470,11 +526,20 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                 MPI_Recv(&middleColAvgTemp, 1, MPI_FLOAT, middleRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                 PrintProgressReport(iter, middleColAvgTemp);
             }
+            // debug
             //printMatrix(tile, blockCols, blockRows, m_rank);
+            MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
+            mpiFlush();
+            mpiPrintf(0, "---------------------------------------------------------------------\n");
+            mpiFlush();
+            if (m_rank == 0)
+            {
+                printMatrix(matrixMM.data(), n, n, m_rank);
+            }
         }
     }
 
-    MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_RES, 0, MPI_COMM_WORLD);
+    //MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
 
     mpiFlush();
     mpiPrintf(0, "---------------------------------------------------------------------\n");
@@ -484,7 +549,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         // Measure total execution time and report
         // double elapsedTime = MPI_Wtime() - startTime;
         // PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
-        printMatrix(matrixMM.data(), n, n, m_rank);
+        //printMatrix(matrixMM.data(), n, n, m_rank);
         // if (m_simulationProperties.GetNumIterations() & 1)
         //     std::copy(matrixMM.begin(), matrixMM.end(), outResult.begin());
     }
