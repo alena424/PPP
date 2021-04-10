@@ -169,10 +169,19 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     MPI_Comm MPI_COL_COMM;
 
-    MPI_Win win;
-    float *mem;                                                                                                            // memory for window
-    MPI_Win_allocate(2 * blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &mem, &win); // size of tile
-    MPI_Win_fence(0, win);                                                                                                 // first fence opens the window
+    MPI_Win winNewTile;
+    MPI_Win winTile;
+    MPI_Info winInfo;
+    if (isModeRMA)
+    {
+        MPI_Info_create(&winInfo);
+        MPI_Info_set(winInfo, "same_size", "true");
+        MPI_Info_set(winInfo, "same_disp_unit", "true");                                                                     // memory for window
+        MPI_Win_create(newTile, blockRows * blockCols * sizeof(float), sizeof(float), winInfo, MPI_COMM_WORLD, &winNewTile); // size of tile
+        MPI_Win_create(tile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winTile); // size of tile
+        MPI_Info_free(&winInfo);                                                                                             // Free winInfo object.
+
+    } // first fence opens the window
 
     //Create a col communicator using split.
     MPI_Comm_split(MPI_COMM_WORLD,
@@ -412,18 +421,29 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         }
         if (isModeRMA)
         {
+            MPI_Win_fence(0, winNewTile); // Open window
+            MPI_Win_fence(0, winTile);    // Open window
+
+            MPI_Win win;
+            if (iter % 2 == 0)
+            {
+                win = winNewTile;
+            }
+            else
+            {
+                win = winTile;
+            }
+
             if (!isLeftRank)
             {
-                MPI_Put(&newTile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, 0, 2, MPI_ROW_BLOCK, win); // put 2 rows to 0 index to rank on the left
-                MPI_Win_fence(0, win);
-                MPI_Get(newTile, 2, MPI_ROW_BLOCK, m_rank - 1, 0, 2, MPI_ROW_BLOCK, win); // gets data from 0. index
+                MPI_Put(&newTile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, (blockCols - 2) * blockRows, 2, MPI_ROW_BLOCK, win); // put 2 rows to 0 index to rank on the left
+                //MPI_Get(newTile, 2, MPI_ROW_BLOCK, m_rank - 1, 0, 2, MPI_ROW_BLOCK, winNewTile);                 // gets data from 0. index
             }
             if (!isRightRank)
             {
                 // Get right border
                 MPI_Put(&newTile[(blockCols - 4) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, 2, MPI_ROW_BLOCK, win);
-                MPI_Win_fence(0, win);
-                MPI_Get(&newTile[(blockCols - 2) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, 2, MPI_ROW_BLOCK, win);
+                //MPI_Get(&newTile[(blockCols - 2) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, 2, MPI_ROW_BLOCK, winNewTile);
             }
         }
         else
@@ -489,16 +509,12 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         }
         if (isModeRMA)
         {
-            MPI_Win_fence(0, win); // closing window
+            MPI_Win_fence(0, winNewTile); // closing window
+            MPI_Win_fence(0, winTile);    // closing window
         }
         else
         {
             MPI_Waitall(4, request, status);
-        }
-
-        if (m_rank == 0)
-        {
-            printMatrix(newTile, blockCols, blockRows, m_rank);
         }
 
         //int middleRank = n / (2 * tileCols);
@@ -564,7 +580,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         MPI_Type_free(&MPI_COL_MAT);
         //delete [] matrix;
     }
-    MPI_Win_free(&win);
+    if (isModeRMA)
+    {
+        MPI_Win_free(&winNewTile);
+        MPI_Win_free(&winTile);
+    }
 
     //Free block of rows
     delete[] tile;
