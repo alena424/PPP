@@ -171,6 +171,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     MPI_Win winNewTile;
     MPI_Win winTile;
+    MPI_Win win;
     MPI_Info winInfo;
     if (isModeRMA)
     {
@@ -424,26 +425,32 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             MPI_Win_fence(0, winNewTile); // Open window
             MPI_Win_fence(0, winTile);    // Open window
 
-            MPI_Win win;
             if (iter % 2 == 0)
             {
-                win = winNewTile;
+                win = winNewTile; // even iterations pointer is on winNewTile
             }
             else
             {
-                win = winTile;
+                win = winTile; // odd iterations pointer is on winTile
             }
 
             if (!isLeftRank)
             {
                 MPI_Put(&newTile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, (blockCols - 2) * blockRows, 2, MPI_ROW_BLOCK, win); // put 2 rows to 0 index to rank on the left
-                //MPI_Get(newTile, 2, MPI_ROW_BLOCK, m_rank - 1, 0, 2, MPI_ROW_BLOCK, winNewTile);                 // gets data from 0. index
             }
             if (!isRightRank)
             {
-                // Get right border
                 MPI_Put(&newTile[(blockCols - 4) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, 2, MPI_ROW_BLOCK, win);
-                //MPI_Get(&newTile[(blockCols - 2) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, 2, MPI_ROW_BLOCK, winNewTile);
+            }
+            if (!isBottomRank)
+            {
+                MPI_Put(&newTile[blockRows - 4], 1, MPI_COL_TILE, m_rank + globalCols, 0, 1, MPI_COL_TILE, win);
+                //MPI_Recv(&newTile[blockRows - 2], 1, MPI_COL_TILE, m_rank + globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            if (!isTopRank)
+            {
+                MPI_Put(&newTile[2], 1, MPI_COL_TILE, m_rank - globalCols, blockRows - 2, 1, MPI_COL_TILE, win);
+                // MPI_Recv(newTile, 1, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
         }
         else
@@ -480,9 +487,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             }
             if (!isTopRank)
             {
-                //int topRankReceiver = m_rank - globalCols;
-                //cout << m_rank << ": sending ..(" << iter << ") " << endl;
-                //printMatrix(&newTile[(blockRows - 4)], 1, 4, m_rank);
                 MPI_Isend(&newTile[2], 1, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, &request[3]);
                 MPI_Recv(newTile, 1, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
