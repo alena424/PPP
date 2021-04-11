@@ -49,6 +49,10 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
                      H5Fclose);
 
     m_simulationProperties.GetDecompGrid(globalCols, globalRows);
+    InitTileVariables();
+    InitRankProfile();
+    InitRankOffsets();
+    InitRankTypes();
 
     // Creating EMPTY HDF5 handle using RAII "AutoHandle" type
     //
@@ -63,6 +67,23 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
     // m_simulationProperties.GetDecompGrid(/* TILES IN X */, /* TILES IN Y */)
 }
 
+void ParallelHeatSolver::InitTileVariables()
+{
+    n = m_materialProperties.GetEdgeSize();
+    tempN = n + 2 * padding;            // padding from left and right
+    tileCols = n / globalCols;          // columns length = tile size X
+    tileRows = n / globalRows;          // rows length = tile size Y
+    blockCols = tileCols + 2 * padding; // tile cols with padding from both sides
+    blockRows = tileRows + 2 * padding; // tile rows with padding from both sides
+    bool isModeRMA = m_simulationProperties.IsRunParallelRMA();
+
+    tile = new float[blockRows * blockCols]();    // old tile
+    newTile = new float[blockRows * blockCols](); // updated tile used in computation
+
+    // We will add borders of padding size to all parameters (it will be easier job to work with extended arrays)
+    domainMap = new int[blockRows * blockCols];
+    domainParams = new float[blockRows * blockCols];
+}
 ParallelHeatSolver::~ParallelHeatSolver()
 {
 }
@@ -114,133 +135,101 @@ int ParallelHeatSolver::mpiGetCommRank(const MPI_Comm &comm)
 int ParallelHeatSolver::mpiGetCommSize(const MPI_Comm &comm)
 {
     int size = -1;
-
     MPI_Comm_size(comm, &size);
-
     return size;
 } // end of mpiGetCommSize
 
-void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &outResult)
+void ParallelHeatSolver::CreateResVector(int count, int stride, MPI_Datatype oldtype, MPI_Datatype *newtype, unsigned long size)
 {
-    int nx, ny;
-    const unsigned int n = m_materialProperties.GetEdgeSize();
-    const unsigned int tempN = n + 2 * padding;            // padding from left and right
-    const unsigned int tileCols = n / globalCols;          // columns length = tile size X
-    const unsigned int tileRows = n / globalRows;          // rows length = tile size Y
-    const unsigned int blockCols = tileCols + 2 * padding; // tile cols with padding from both sides
-    const unsigned int blockRows = tileRows + 2 * padding; // tile rows with padding from both sides
-    bool isModeRMA = m_simulationProperties.IsRunParallelRMA();
+    MPI_Datatype tempType;
+    MPI_Type_vector(count, 1, stride, oldtype, &tempType);
+    MPI_Type_commit(&tempType);
+    MPI_Type_create_resized(tempType, 0, 1 * size, newtype);
+    MPI_Type_commit(newtype);
+}
 
-    float *tile = new float[blockRows * blockCols]();    // old tile
-    float *newTile = new float[blockRows * blockCols](); // updated tile used in computation
-
-    // We will add borders of padding size to all parameters (it will be easier job to work with extended arrays)
-    int *domainMap = new int[blockRows * blockCols];
-    float *domainParams = new float[blockRows * blockCols];
-    float *matrix = nullptr;                                     // result matrix
-    std::vector<float, AlignedAllocator<float>> matrixMM(n * n); // computed final matrix
-    double startTime = 0.0;
-
-    bool isLeftRank = m_rank % globalCols == 0;
-    bool isRightRank = m_rank % globalCols == globalCols - 1;
-    bool isTopRank = m_rank < globalCols;
-    bool isBottomRank = m_rank >= m_size - globalCols;
-
-    // cout << "griiid globalCols:" << globalCols << ", globalRows:" << globalRows << " >> tileRows: " << tileRows << ", tileCols:" << tileCols << endl;
-    // cout << "griiid blockCols:" << blockCols << ", blockRows:" << blockRows << " >> tempN: " << tempN << ", n:" << n << endl;
-    // cout << m_rank << ": isLeftRank:" << isLeftRank << ", isRightRank:" << isRightRank << " >> isTopRank: " << isTopRank << ", isBottomRank:" << isBottomRank << endl;
-
-    // Declare datatype for all columbs in Matrix
-    MPI_Datatype MPI_COL_MAT;
-    MPI_Datatype MPI_COL_MAT_RES;
-
-    MPI_Datatype MPI_COL_TILE;
-    MPI_Datatype MPI_COL_TILE_N;
-    MPI_Datatype MPI_COL_TILE_N_RES;
-
-    MPI_Datatype MPI_ROW_BLOCK;
-    MPI_Datatype MPI_ROW_MAP;
-
-    MPI_Datatype MPI_COL_MAP;
-    MPI_Datatype MPI_COL_MAP_RES;
-
-    MPI_Datatype MPI_TILE;
-    MPI_Datatype MPI_TILE_RES;
-
-    MPI_Comm MPI_COL_COMM;
-
-    MPI_Win winNewTile;
-    MPI_Win winTile;
-    MPI_Win win;
-    MPI_Info winInfo;
-    if (isModeRMA)
+int *ParallelHeatSolver::GetSendCounts(int offset)
+{
+    int *sendCounts = new int[m_size];
+    for (int i = 0; i < m_size; i++)
     {
-        MPI_Info_create(&winInfo);
-        MPI_Info_set(winInfo, "same_size", "true");
-        MPI_Info_set(winInfo, "same_disp_unit", "true");                                                                     // memory for window
-        MPI_Win_create(newTile, blockRows * blockCols * sizeof(float), sizeof(float), winInfo, MPI_COMM_WORLD, &winNewTile); // size of tile
-        MPI_Win_create(tile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winTile); // size of tile
-        MPI_Info_free(&winInfo);                                                                                             // Free winInfo object.
-
-    } // first fence opens the window
-
-    //Create a col communicator using split.
-    MPI_Comm_split(MPI_COMM_WORLD,
-                   m_rank % globalCols,
-                   m_rank / globalCols,
-                   &MPI_COL_COMM);
-
-    if (m_rank == 0)
-    {
-        startTime = MPI_Wtime();
-        matrix = new float[n * n];
-
-        AddPaddingToArray(m_materialProperties.GetInitTemp().data(), n, padding, m_tempArray.data());
-        AddPaddingToArray(m_materialProperties.GetDomainParams().data(), n, padding, m_domainParams.data());
-        AddPaddingToIntArray(m_materialProperties.GetDomainMap().data(), n, padding, m_domainMap.data());
-
-        // Create subarray
-        int *sizeTile = new int[2];
-        sizeTile[0] = tileRows;
-        sizeTile[1] = tileCols;
-
-        int *size = new int[2];
-        size[0] = n;
-        size[1] = n;
-
-        int *start = new int[2];
-        start[0] = 0;
-        start[1] = 0;
-        // Create 2d subarray for matrix distribution
-        // MPI_Type_create_subarray(2, size, sizeTile, start, MPI_ORDER_C, MPI_FLOAT, &MPI_GLOBAL_TILE);
-        // MPI_Type_commit(&MPI_GLOBAL_TILE);
-        // MPI_Type_create_resized(MPI_GLOBAL_TILE, 0, 1 * sizeof(float), &MPI_GLOBAL_TILE_RES);
-        // MPI_Type_commit(&MPI_GLOBAL_TILE_RES);
-
-        printMatrix(m_tempArray.data(), tempN, tempN, m_rank);
-        // Create type for one column in matrix (with padding)  of type float
-        MPI_Type_vector(blockRows, 1, tempN, MPI_FLOAT, &MPI_COL_MAT);
-        MPI_Type_commit(&MPI_COL_MAT);
-        MPI_Type_create_resized(MPI_COL_MAT, 0, 1 * sizeof(float), &MPI_COL_MAT_RES);
-        MPI_Type_commit(&MPI_COL_MAT_RES);
-
-        // Create type for one column in matrix (with padding) of type int
-        MPI_Type_vector(blockRows, 1, tempN, MPI_INT, &MPI_COL_MAP);
-        MPI_Type_commit(&MPI_COL_MAP);
-        MPI_Type_create_resized(MPI_COL_MAP, 0, 1 * sizeof(int), &MPI_COL_MAP_RES);
-        MPI_Type_commit(&MPI_COL_MAP_RES);
-
-        // Create type for one column in matrix (without padding)  of type float
-        MPI_Type_vector(tileRows, 1, n, MPI_FLOAT, &MPI_COL_TILE_N);
-        MPI_Type_commit(&MPI_COL_TILE_N);
-        MPI_Type_create_resized(MPI_COL_TILE_N, 0, 1 * sizeof(float), &MPI_COL_TILE_N_RES);
-        MPI_Type_commit(&MPI_COL_TILE_N_RES);
+        sendCounts[i] = offset;
     }
+    return sendCounts;
+}
 
-    mpiFlush();
-    mpiPrintf(0, "---------------------------------------------------------------------\n");
-    mpiFlush();
+int *ParallelHeatSolver::GetDisplacementCounts(int n)
+{
+    int *displacements = new int[m_size];
+    displacements[0] = 0;
+    int poc = 0;
+    for (int i = 0; i < globalRows; i++)
+    {
+        for (int j = 0; j < globalCols; j++)
+        {
 
+            displacements[poc] = (j * tileCols) + (i * tileRows * n);
+            poc++;
+        }
+    }
+    return displacements;
+}
+
+void ParallelHeatSolver::InitRankOffsets()
+{
+
+    rankOffsets.startLF = 2;
+    rankOffsets.endLF = blockRows - 2;
+    rankOffsets.startTB = 2;
+    rankOffsets.endTB = blockCols - 2;
+    if (rankProfile.isBottomRank)
+    {
+        rankOffsets.endLF = blockRows - 4;
+    }
+    if (rankProfile.isTopRank)
+    {
+        rankOffsets.startLF = 4;
+    }
+    // mozna bude potreba prehodit
+    if (rankProfile.isLeftRank)
+    {
+        rankOffsets.startTB = 4; // starting computation from fourth row
+    }
+    if (rankProfile.isRightRank)
+    {
+        rankOffsets.endTB = blockCols - 4;
+    }
+    if (!rankProfile.isLeftRank && !rankProfile.isRightRank && !rankProfile.isTopRank && !rankProfile.isBottomRank)
+    {
+        // Avoid duplicating calculation
+        rankOffsets.startTB = 4;
+        rankOffsets.endTB = blockCols - 4;
+    }
+}
+
+void ParallelHeatSolver::InitRankProfile()
+{
+    rankProfile.isLeftRank = m_rank % globalCols == 0;
+    rankProfile.isRightRank = m_rank % globalCols == globalCols - 1;
+    rankProfile.isTopRank = m_rank < globalCols;
+    rankProfile.isBottomRank = m_rank >= m_size - globalCols;
+}
+
+void ParallelHeatSolver::InitWorkingArrays()
+{
+    AddPaddingToArray(m_materialProperties.GetInitTemp().data(), n, padding, m_tempArray.data());
+    AddPaddingToArray(m_materialProperties.GetDomainParams().data(), n, padding, m_domainParams.data());
+    AddPaddingToIntArray(m_materialProperties.GetDomainMap().data(), n, padding, m_domainMap.data());
+}
+
+void ParallelHeatSolver::InitRootRankTypes()
+{
+    CreateResVector(blockRows, tempN, MPI_FLOAT, &MPI_COL_MAT_RES, sizeof(float)); //Create type for one column in matrix (with padding)  of type float
+    CreateResVector(blockRows, tempN, MPI_INT, &MPI_COL_MAP_RES, sizeof(int));     // Create type for one column in matrix (with padding) of type int
+    CreateResVector(tileRows, n, MPI_FLOAT, &MPI_COL_TILE_N_RES, sizeof(float));
+}
+void ParallelHeatSolver::InitRankTypes()
+{
     MPI_Type_vector(blockCols, 2, blockRows, MPI_FLOAT, &MPI_COL_TILE);
     MPI_Type_commit(&MPI_COL_TILE);
 
@@ -262,33 +251,10 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     MPI_Type_commit(&MPI_ROW_BLOCK);
     MPI_Type_commit(&MPI_ROW_MAP);
+}
 
-    // Allocate arrays for sendCounts and displacements
-    int *sendCountsTempN = new int[m_size];
-    int *sendCountsN = new int[m_size];
-
-    int *sendCounts = new int[m_size];
-    int *displacementsTempN = new int[m_size];
-    int *displacementsN = new int[m_size];
-
-    displacementsTempN[0] = 0;
-    displacementsN[0] = 0;
-    for (int i = 0; i < m_size; i++)
-    {
-        sendCountsTempN[i] = blockCols;
-        sendCountsN[i] = tileCols;
-    }
-    int poc = 0;
-    for (int i = 0; i < globalRows; i++)
-    {
-        for (int j = 0; j < globalCols; j++)
-        {
-
-            displacementsTempN[poc] = (j * tileCols) + (i * tileRows * tempN);
-            displacementsN[poc] = (j * tileCols) + (i * tileRows * n);
-            poc++;
-        }
-    }
+void ParallelHeatSolver::ScatterValues(int *sendCountsTempN, int *displacementsTempN)
+{
 
     MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, tile, blockCols, MPI_ROW_BLOCK,
                  0, MPI_COMM_WORLD);
@@ -301,43 +267,64 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     MPI_Scatterv(m_domainMap.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAP_RES, domainMap, blockCols, MPI_ROW_BLOCK,
                  0, MPI_COMM_WORLD);
+}
 
-    printMatrix(tile, blockCols, blockRows, m_rank);
-
-    mpiFlush();
-    mpiPrintf(0, "----------------------------END-----------------------------------------\n");
-    mpiFlush();
-
+void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &outResult)
+{
     float middleColAvgTemp = 0.0f;
-    // Begin iterative simulation main loop
-    int startLF = 2;
-    int endLF = blockRows - 2;
-    int startTB = 2;
-    int endTB = blockCols - 2;
-    if (isBottomRank)
+    std::vector<float, AlignedAllocator<float>> matrixMM(n * n); // computed final matrix
+    double startTime = 0.0;
+
+    // cout << "griiid globalCols:" << globalCols << ", globalRows:" << globalRows << " >> tileRows: " << tileRows << ", tileCols:" << tileCols << endl;
+    // cout << "griiid blockCols:" << blockCols << ", blockRows:" << blockRows << " >> tempN: " << tempN << ", n:" << n << endl;
+    // cout << m_rank << ": isLeftRank:" << isLeftRank << ", rankProfile.isRightRank:" << rankProfile.isRightRank << " >> rankProfile.isTopRank: " << rankProfile.isTopRank << ", rankProfile.isBottomRank:" << rankProfile.isBottomRank << endl;
+
+    MPI_Comm MPI_COL_COMM;
+
+    MPI_Win winNewTile;
+    MPI_Win winTile;
+    MPI_Win win;
+
+    if (isModeRMA)
     {
-        endLF = blockRows - 4;
+        MPI_Win_create(newTile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winNewTile); // size of tile
+        MPI_Win_create(tile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winTile);       // size of tile
     }
-    if (isTopRank)
+
+    // Create a col communicator using split
+    MPI_Comm_split(MPI_COMM_WORLD,
+                   m_rank % globalCols,
+                   m_rank / globalCols,
+                   &MPI_COL_COMM);
+
+    if (m_rank == 0)
     {
-        startLF = 4;
+        startTime = MPI_Wtime();
+        InitWorkingArrays();
+        InitRootRankTypes();
     }
-    // mozna bude potreba prehodit
-    if (isLeftRank)
-    {
-        startTB = 4; // starting computation from fourth row
-    }
-    if (isRightRank)
-    {
-        endTB = blockCols - 4;
-    }
-    if (!isLeftRank && !isRightRank && !isTopRank && !isBottomRank)
-    {
-        // Avoid duplicating calculation
-        startTB = 4;
-        endTB = blockCols - 4;
-    }
-    //cout << m_rank << ": startLF:" << startLF << ", endLF:" << endLF << " >> startTB: " << startTB << ", endTB:" << endTB << endl;
+    int *sendCountsN = GetSendCounts(tileCols);
+    int *displacementsN = GetDisplacementCounts(n);
+
+    // Allocate arrays for sendCounts and displacements
+    int *sendCountsTempN = GetSendCounts(blockCols);
+    int *displacementsTempN = GetDisplacementCounts(tempN);
+
+    // ScatterValues(sendCountsTempN, displacementsTempN);
+
+    MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, tile, blockCols, MPI_ROW_BLOCK,
+                 0, MPI_COMM_WORLD);
+
+    MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, newTile, blockCols, MPI_ROW_BLOCK,
+                 0, MPI_COMM_WORLD);
+
+    MPI_Scatterv(m_domainParams.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, domainParams, blockCols, MPI_ROW_BLOCK,
+                 0, MPI_COMM_WORLD);
+
+    MPI_Scatterv(m_domainMap.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAP_RES, domainMap, blockCols, MPI_ROW_BLOCK,
+                 0, MPI_COMM_WORLD);
+    //printMatrix(tile, blockCols, blockRows, m_rank);
+    //cout << m_rank << ": rankOffsets.startLF:" << rankOffsets.startLF << ", rankOffsets.rankOffsets.endLF:" << rankOffsets.rankOffsets.endLF << " >> rankOffsets.startTB: " << rankOffsets.startTB << ", rankOffsets.endTB:" << rankOffsets.endTB << endl;
 
     for (size_t iter = 0; iter < m_simulationProperties.GetNumIterations(); ++iter)
     {
@@ -345,80 +332,29 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         MPI_Status status[4];
         // Count only borders
         // Count left border
-        if (!isLeftRank)
+        if (!rankProfile.isLeftRank)
         {
-            for (unsigned int i = 2; i < 4; ++i) // Start from second row
-            {
-                for (unsigned int j = startLF; j < endLF; ++j) //
-                {
-                    ComputePoint(tile, newTile,
-                                 domainParams,
-                                 domainMap,
-                                 i, j,
-                                 blockRows,
-                                 m_simulationProperties.GetAirFlowRate(),
-                                 m_materialProperties.GetCoolerTemp());
-                }
-            }
+            UpdateTile(tile, newTile, domainParams, domainMap, rankOffsets.startLF, 2, rankOffsets.endLF - rankOffsets.startLF, 2, blockRows,
+                       m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
             //printMatrix(newTile, blockCols, blockRows, m_rank);
         }
-        if (!isRightRank)
+        if (!rankProfile.isRightRank)
         {
             //Count right border
-            for (unsigned int i = blockCols - 4; i < blockCols - 2; ++i)
-            {
-                for (unsigned int j = startLF; j < endLF; ++j)
-                {
-                    ComputePoint(tile, newTile,
-                                 domainParams,
-                                 domainMap,
-                                 i, j,
-                                 blockRows,
-                                 m_simulationProperties.GetAirFlowRate(),
-                                 m_materialProperties.GetCoolerTemp());
-                }
-            }
+            UpdateTile(tile, newTile, domainParams, domainMap, rankOffsets.startLF, blockCols - 4, rankOffsets.endLF - rankOffsets.startLF, 2, blockRows,
+                       m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
             //printMatrix(newTile, blockCols, blockRows, m_rank);
         }
-        if (!isBottomRank)
+        if (!rankProfile.isBottomRank)
         {
-            // for (unsigned int j = 2 + 2; j < blockRows - 2 - 2; ++j)
-            //for (unsigned int i = startTB; i < endTB; ++i) // We need to go throught all the rows
-            for (unsigned int i = startTB; i < endTB; ++i)
-            {
-                //for (unsigned int j = 2 + 2; j < 4 + 2; ++j) //Columbs
-                for (unsigned int j = blockRows - 4; j < blockRows - 2; ++j) // We need to go throught all the rows
-                {
-                    ComputePoint(tile, newTile,
-                                 domainParams,
-                                 domainMap,
-                                 i, j,
-                                 blockRows,
-                                 m_simulationProperties.GetAirFlowRate(),
-                                 m_materialProperties.GetCoolerTemp());
-                }
-            }
-            //printMatrix(newTile, blockCols, blockRows, m_rank);
-            //printMatrix(newTile, blockCols, blockRows, m_rank);
+            UpdateTile(tile, newTile, domainParams, domainMap, blockRows - 4, rankOffsets.startTB, 2, rankOffsets.endTB - rankOffsets.startTB, blockRows,
+                       m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
         }
-        if (!isTopRank)
+        if (!rankProfile.isTopRank)
         {
             //Count top = right border
-            //for (unsigned int i = startTB; i < endTB; ++i)
-            for (unsigned int i = startTB; i < endTB; ++i)
-            {
-                //for (unsigned int j = blockCols - 4 - 2; j < blockCols - 2 - 2; ++j)
-                for (unsigned int j = 2; j < 4; ++j)
-                {
-                    ComputePoint(tile, newTile,
-                                 domainParams,
-                                 domainMap,
-                                 i, j,
-                                 blockRows,
-                                 m_simulationProperties.GetAirFlowRate(),
-                                 m_materialProperties.GetCoolerTemp());
-                }
-            }
+            UpdateTile(tile, newTile, domainParams, domainMap, 2, rankOffsets.startTB, 2, rankOffsets.endTB - rankOffsets.startTB, blockRows,
+                       m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
         }
         if (isModeRMA)
         {
@@ -434,29 +370,27 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                 win = winTile; // odd iterations pointer is on winTile
             }
 
-            if (!isLeftRank)
+            if (!rankProfile.isLeftRank)
             {
                 MPI_Put(&newTile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, (blockCols - 2) * blockRows, 2, MPI_ROW_BLOCK, win); // put 2 rows to 0 index to rank on the left
             }
-            if (!isRightRank)
+            if (!rankProfile.isRightRank)
             {
                 MPI_Put(&newTile[(blockCols - 4) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, 2, MPI_ROW_BLOCK, win);
             }
-            if (!isBottomRank)
+            if (!rankProfile.isBottomRank)
             {
                 MPI_Put(&newTile[blockRows - 4], 1, MPI_COL_TILE, m_rank + globalCols, 0, 1, MPI_COL_TILE, win);
-                //MPI_Recv(&newTile[blockRows - 2], 1, MPI_COL_TILE, m_rank + globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
-            if (!isTopRank)
+            if (!rankProfile.isTopRank)
             {
                 MPI_Put(&newTile[2], 1, MPI_COL_TILE, m_rank - globalCols, blockRows - 2, 1, MPI_COL_TILE, win);
-                // MPI_Recv(newTile, 1, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
         }
         else
         {
             // Send counted values
-            if (!isLeftRank)
+            if (!rankProfile.isLeftRank)
             {
                 // Send left border
                 MPI_Isend(&newTile[2 * blockRows], 2, MPI_ROW_BLOCK, m_rank - 1, 0, MPI_COMM_WORLD, &request[0]);
@@ -466,7 +400,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             {
                 request[0] = MPI_REQUEST_NULL;
             }
-            if (!isRightRank)
+            if (!rankProfile.isRightRank)
             {
                 // Get right border
                 MPI_Isend(&newTile[(blockCols - 4) * blockRows], 2, MPI_ROW_BLOCK, m_rank + 1, 0, MPI_COMM_WORLD, &request[1]);
@@ -476,7 +410,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             {
                 request[1] = MPI_REQUEST_NULL;
             }
-            if (!isBottomRank)
+            if (!rankProfile.isBottomRank)
             {
                 MPI_Isend(&newTile[blockRows - 4], 1, MPI_COL_TILE, m_rank + globalCols, 0, MPI_COMM_WORLD, &request[2]);
                 MPI_Recv(&newTile[blockRows - 2], 1, MPI_COL_TILE, m_rank + globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -485,7 +419,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             {
                 request[2] = MPI_REQUEST_NULL;
             }
-            if (!isTopRank)
+            if (!rankProfile.isTopRank)
             {
                 MPI_Isend(&newTile[2], 1, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, &request[3]);
                 MPI_Recv(newTile, 1, MPI_COL_TILE, m_rank - globalCols, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -497,69 +431,34 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         }
 
         // // Count inner block
-        for (unsigned int i = 4; i < blockCols - 4; ++i)
-        {
-            for (unsigned int j = 2 + 2; j < blockRows - 4; ++j)
-            {
-                //cout << m_rank << ": counting " << i << ", " << j << endl;
-                ComputePoint(tile, newTile,
-                             domainParams,
-                             domainMap,
-                             i, j,
-                             blockRows,
-                             m_simulationProperties.GetAirFlowRate(),
-                             m_materialProperties.GetCoolerTemp());
-            }
-        }
+        UpdateTile(tile, newTile, domainParams, domainMap, 4, 4, blockRows - 8, blockCols - 8, blockRows,
+                   m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
         if (isModeRMA)
         {
-            MPI_Win_fence(0, winNewTile); // closing window
-            MPI_Win_fence(0, winTile);    // closing window
+            MPI_Win_fence(0, winNewTile); // closing window winNewTile
+            MPI_Win_fence(0, winTile);    // closing window winTile
         }
         else
         {
             MPI_Waitall(4, request, status);
         }
 
-        //int middleRank = n / (2 * tileCols);
-        float localSum = 0.0f;
-        float temperatureSum = 0.0f;
-        bool evenColumns = globalCols % 2 == 0;
-        for (int i = 2; i < tileRows + 2; i++)
-        {
-            if (evenColumns)
-            {
-                // Compute the first row
-                localSum += newTile[2 * blockRows + i];
-            }
-            else
-            {
-                // Compute the middle row
-                int middleRow = std::ceil(tileCols / 2.0) - 1;
-                localSum += newTile[2 * blockRows + (middleRow * blockRows) + i];
-            }
-        }
-
-        if (MPI_COL_COMM != MPI_COMM_NULL)
-        {
-            MPI_Reduce(&localSum, &temperatureSum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COL_COMM);
-        }
-        int middleRank = globalCols / 2;
-        if (middleRank == m_rank)
-        {
-            //printMatrix(newTile, blockCols, blockRows, m_rank);
-            middleColAvgTemp = temperatureSum / (tileRows * mpiGetCommSize(MPI_COL_COMM));
-            MPI_Send(&middleColAvgTemp, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
-        }
-
-        // // // Swap source and destination buffers
-        std::swap(tile, newTile);
+        ComputeMiddleColAvgTemp(
+            globalCols,
+            newTile,
+            tileRows,
+            tileCols,
+            blockRows,
+            &middleColAvgTemp,
+            MPI_COL_COMM,
+            m_rank);
 
         if (m_rank == 0)
         {
-            MPI_Recv(&middleColAvgTemp, 1, MPI_FLOAT, middleRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             PrintProgressReport(iter, middleColAvgTemp);
         }
+        // Swap source and destination buffers
+        std::swap(tile, newTile);
     }
 
     MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
@@ -570,19 +469,17 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     if (m_rank == 0)
     {
         // Measure total execution time and report
-        // double elapsedTime = MPI_Wtime() - startTime;
-        // PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
+        double elapsedTime = MPI_Wtime() - startTime;
+        PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
         printMatrix(matrixMM.data(), n, n, m_rank);
-        // if (m_simulationProperties.GetNumIterations() & 1)
-        //     std::copy(matrixMM.begin(), matrixMM.end(), outResult.begin());
+        if (m_simulationProperties.GetNumIterations() & 1)
+            std::copy(matrixMM.begin(), matrixMM.end(), outResult.begin());
     }
 
     MPI_Type_free(&MPI_ROW_BLOCK);
     if (m_rank == 0)
     {
         MPI_Type_free(&MPI_COL_MAT_RES);
-        MPI_Type_free(&MPI_COL_MAT);
-        //delete [] matrix;
     }
     if (isModeRMA)
     {
@@ -652,12 +549,51 @@ void ParallelHeatSolver::mpiPrintf(int who,
     }
 } // end of mpiPrintf
 
-float ParallelHeatSolver::ComputeMiddleColAvgTemp(const float *data) const
+void ParallelHeatSolver::ComputeMiddleColAvgTemp(
+    int globalCols,
+    float *newTile,
+    int tileRows,
+    int tileCols,
+    int blockRows,
+    float *middleColAvgTemp,
+    const MPI_Comm &comm,
+    int m_rank)
 {
-    float middleColAvgTemp = 0.0f;
-    for (size_t i = 2; i < m_materialProperties.GetEdgeSize() + 2; ++i)
-        middleColAvgTemp += data[i];
-    return middleColAvgTemp / float(m_materialProperties.GetEdgeSize());
+    float localSum = 0.0f;
+    float temperatureSum = 0.0f;
+    bool evenColumns = globalCols % 2 == 0;
+
+    for (int i = 2; i < tileRows + 2; i++)
+    {
+        if (evenColumns)
+        {
+            // Compute the first row
+            localSum += newTile[2 * blockRows + i];
+        }
+        else
+        {
+            // Compute the middle row
+            int middleRow = std::ceil(tileCols / 2.0) - 1;
+            localSum += newTile[2 * blockRows + (middleRow * blockRows) + i];
+        }
+    }
+    if (comm != MPI_COMM_NULL)
+    {
+        MPI_Reduce(&localSum, &temperatureSum, 1, MPI_FLOAT, MPI_SUM, 0, comm);
+    }
+    int middleRank = globalCols / 2;
+
+    if (middleRank == m_rank)
+    {
+        //printMatrix(newTile, blockCols, blockRows, m_rank);
+        *middleColAvgTemp = temperatureSum / (tileRows * mpiGetCommSize(comm));
+        MPI_Send(middleColAvgTemp, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+    }
+
+    if (m_rank == 0)
+    {
+        MPI_Recv(middleColAvgTemp, 1, MPI_FLOAT, middleRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
 }
 
 /**
