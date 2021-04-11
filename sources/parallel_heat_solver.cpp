@@ -75,7 +75,7 @@ void ParallelHeatSolver::InitTileVariables()
     tileRows = n / globalRows;          // rows length = tile size Y
     blockCols = tileCols + 2 * padding; // tile cols with padding from both sides
     blockRows = tileRows + 2 * padding; // tile rows with padding from both sides
-    bool isModeRMA = m_simulationProperties.IsRunParallelRMA();
+    isModeRMA = m_simulationProperties.IsRunParallelRMA();
 
     tile = new float[blockRows * blockCols]();    // old tile
     newTile = new float[blockRows * blockCols](); // updated tile used in computation
@@ -310,19 +310,19 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     int *sendCountsTempN = GetSendCounts(blockCols);
     int *displacementsTempN = GetDisplacementCounts(tempN);
 
-    // ScatterValues(sendCountsTempN, displacementsTempN);
+    ScatterValues(sendCountsTempN, displacementsTempN);
 
-    MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, tile, blockCols, MPI_ROW_BLOCK,
-                 0, MPI_COMM_WORLD);
+    // MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, tile, blockCols, MPI_ROW_BLOCK,
+    //              0, MPI_COMM_WORLD);
 
-    MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, newTile, blockCols, MPI_ROW_BLOCK,
-                 0, MPI_COMM_WORLD);
+    // MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, newTile, blockCols, MPI_ROW_BLOCK,
+    //              0, MPI_COMM_WORLD);
 
-    MPI_Scatterv(m_domainParams.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, domainParams, blockCols, MPI_ROW_BLOCK,
-                 0, MPI_COMM_WORLD);
+    // MPI_Scatterv(m_domainParams.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, domainParams, blockCols, MPI_ROW_BLOCK,
+    //              0, MPI_COMM_WORLD);
 
-    MPI_Scatterv(m_domainMap.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAP_RES, domainMap, blockCols, MPI_ROW_BLOCK,
-                 0, MPI_COMM_WORLD);
+    // MPI_Scatterv(m_domainMap.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAP_RES, domainMap, blockCols, MPI_ROW_BLOCK,
+    //              0, MPI_COMM_WORLD);
     //printMatrix(tile, blockCols, blockRows, m_rank);
     //cout << m_rank << ": rankOffsets.startLF:" << rankOffsets.startLF << ", rankOffsets.rankOffsets.endLF:" << rankOffsets.rankOffsets.endLF << " >> rankOffsets.startTB: " << rankOffsets.startTB << ", rankOffsets.endTB:" << rankOffsets.endTB << endl;
 
