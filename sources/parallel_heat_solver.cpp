@@ -24,49 +24,6 @@ using namespace std;
 //                             *** END: NOTE ***
 //============================================================================//
 
-ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
-                                       MaterialProperties &materialProps) : BaseHeatSolver(simulationProps, materialProps),
-                                                                            m_fileHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t)>(nullptr))
-{
-    MPI_Comm_size(MPI_COMM_WORLD, &m_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
-
-    // std::cout << "Number of process is: " << m_size << std::endl;
-    // std::cout << "I am rank: " << m_rank << std::endl;
-
-    int matrixSize = (materialProps.GetEdgeSize() + padding * 2) * (materialProps.GetEdgeSize() + padding * 2);
-
-    m_tempArray.resize(matrixSize);
-    m_domainParams.resize(matrixSize);
-    m_domainMap.resize(matrixSize);
-
-    // 1. Open output file if its name was specified.
-    AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t)>(nullptr));
-
-    if (!m_simulationProperties.GetOutputFileName().empty())
-        myHandle.Set(H5Fcreate(simulationProps.GetOutputFileName("par").c_str(),
-                               H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT),
-                     H5Fclose);
-
-    m_simulationProperties.GetDecompGrid(globalCols, globalRows);
-    InitTileVariables();
-    InitRankProfile();
-    InitRankOffsets();
-    InitRankTypes();
-
-    // Creating EMPTY HDF5 handle using RAII "AutoHandle" type
-    //
-    // AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t )>(nullptr))
-    //
-    // This can be particularly useful when creating handle as class member!
-    // Handle CANNOT be assigned using "=" or copy-constructor, yet it can be set
-    // using ".Set(/* handle */, /* close/free function */)" as in:
-    // myHandle.Set(H5Fopen(...), H5Fclose);
-
-    // Requested domain decomposition can be queried by
-    // m_simulationProperties.GetDecompGrid(/* TILES IN X */, /* TILES IN Y */)
-}
-
 void ParallelHeatSolver::InitTileVariables()
 {
     n = m_materialProperties.GetEdgeSize();
@@ -303,6 +260,53 @@ void ParallelHeatSolver::ScatterValues(int *sendCountsTempN, int *displacementsT
                  0, MPI_COMM_WORLD);
 } // end of ScatterValues
 
+ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
+                                       MaterialProperties &materialProps) : BaseHeatSolver(simulationProps, materialProps),
+                                                                            m_fileHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t)>(nullptr))
+{
+    MPI_Comm_size(MPI_COMM_WORLD, &m_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
+
+    // std::cout << "Number of process is: " << m_size << std::endl;
+    // std::cout << "I am rank: " << m_rank << std::endl;
+
+    int matrixSize = (materialProps.GetEdgeSize() + padding * 2) * (materialProps.GetEdgeSize() + padding * 2);
+
+    m_tempArray.resize(matrixSize);
+    m_domainParams.resize(matrixSize);
+    m_domainMap.resize(matrixSize);
+
+    // 1. Open output file if its name was specified.
+    AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t)>(nullptr));
+
+    if (!m_simulationProperties.GetOutputFileName().empty())
+        myHandle.Set(H5Fcreate(simulationProps.GetOutputFileName("par").c_str(),
+                               H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT),
+                     H5Fclose);
+
+    m_simulationProperties.GetDecompGrid(globalCols, globalRows);
+    InitTileVariables();
+    InitRankProfile();
+    InitRankOffsets();
+    InitRankTypes();
+
+    if (isModeRMA)
+    {
+        MPI_Win_create(newTile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winNewTile); // size of tile
+        MPI_Win_create(tile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winTile);       // size of tile
+    }
+
+    // Creating EMPTY HDF5 handle using RAII "AutoHandle" type
+    //
+    // AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t )>(nullptr))
+    //
+    // This can be particularly useful when creating handle as class member!
+    // Handle CANNOT be assigned using "=" or copy-constructor, yet it can be set
+    // using ".Set(/* handle */, /* close/free function */)" as in:
+    // myHandle.Set(H5Fopen(...), H5Fclose);
+
+} // end of ParallelHeatSolver constructor
+
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &outResult)
 {
     float middleColAvgTemp = 0.0f;
@@ -313,13 +317,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     // cout << "griiid blockCols:" << blockCols << ", blockRows:" << blockRows << " >> tempN: " << tempN << ", n:" << n << endl;
     // cout << m_rank << ": isLeftRank:" << isLeftRank << ", rankProfile.isRightRank:" << rankProfile.isRightRank << " >> rankProfile.isTopRank: " << rankProfile.isTopRank << ", rankProfile.isBottomRank:" << rankProfile.isBottomRank << endl;
 
-    MPI_Comm MPI_COL_COMM;
-    MPI_Win win;
-    if (isModeRMA)
-    {
-        MPI_Win_create(newTile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winNewTile); // size of tile
-        MPI_Win_create(tile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winTile);       // size of tile
-    }
+    MPI_Comm MPI_COL_COMM; // Comunicator for counting middle average temperature.
+    MPI_Win win;           // local window that will be used as winNewTile or winTile depending on number of iteration
 
     // Create a col communicator using split
     MPI_Comm_split(MPI_COMM_WORLD,
