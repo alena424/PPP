@@ -117,30 +117,101 @@ protected:
     MPI_Datatype MPI_TILE;
     MPI_Datatype MPI_COL_TILE;
 
-    AutoHandle<hid_t>
-        m_fileHandle;
+    // Windows for RMA mode
+    MPI_Win winNewTile;
+    MPI_Win winTile;
+
+    AutoHandle<hid_t> m_fileHandle;
+
+    /**
+     * @brief Add padding to top, left, bottom, right of the array of float
+     * @param data [IN] Array to which edge will be added 
+     * @param size size row/col size
+     * @param padding size of padding
+     * @param [OUT] Output array with borders
+     */
+
     void AddPaddingToArray(float *data, int size, int padding, float *newData);
+    /**
+     * @brief Add padding to top, left, bottom, right of the array of int.
+     * @param data [IN] Array to which edge will be added.
+     * @param size Row/col size.
+     * @param padding Size of padding.
+     * @param [OUT] Output array with borders.
+     */
     void AddPaddingToIntArray(int *data, int size, int padding, int *newData);
-    int mpiGetCommRank(const MPI_Comm &comm);
+
+    /**
+     * @brief Get size of the communicator.
+     * @param [in] comm - actual communicator.
+     * @return number of ranks within the comm.
+     */
     int mpiGetCommSize(const MPI_Comm &comm);
+
+    /**
+     * @brief Create and commits new vector type.
+     * @param count Size of vector (number fo elements).
+     * @param stride Vector stride.
+     * @param oldtype Type from which the new type will be created.
+     * @param newtype New desired type vector.
+     * @param size Resized size.
+     */
     void CreateResVector(int count, int stride, MPI_Datatype oldtype, MPI_Datatype *newtype, unsigned long size);
+
+    /**
+     * @brief Create array of m_size filled with offset number at each position (used at Scatter_v).
+     * @param offset Number that will be put at each position.
+     */
     int *GetSendCounts(int offset);
+
+    /**
+     * @brief Count displacement for each tile taking into account global displacement.
+     * @param n Tile row size.
+     */
     int *GetDisplacementCounts(int n);
-    void ComputeMiddleColAvgTemp(
-        int globalCols,
-        float *newTile,
-        int tileRows,
-        int tileCols,
-        int blockRows,
-        float *middleColAvgTemp,
-        const MPI_Comm &comm,
-        int rank);
+
+    /**
+     * @brief Compute middle temperature.
+     * @param middleColAvgTemp [OUT] Output middle temperature.
+     * @param comm Comunicator that will be used to compute the middle temperature.
+     */
+    void ComputeMiddleColAvgTemp(float *middleColAvgTemp, const MPI_Comm &comm);
+
+    /**
+     * @brief Init information about rank position in the global tile.
+     */
     void InitRankProfile();
+
+    /**
+     * @brief Init all class state variables (as tile, new tile, domainParams etc.).
+     */
     void InitTileVariables();
+
+    /**
+     * @brief Init beggining and end of tile computation according to rank position (left, rigt, top).
+     */
     void InitRankOffsets();
+
+    /**
+     * @brief Init values of material arrays (domainParams, domainMap, tempArray) - add padding to them.
+     */
     void InitWorkingArrays();
+
+    /**
+     * @brief Init new types for root rank.
+     */
     void InitRootRankTypes();
+
+    /**
+     * @brief Init types for all ranks.
+     */
     void InitRankTypes();
+
+    /**
+     * @brief Scatter values of working material arrays to all process.
+     * @param sendCountsTempN Integer array specifying the number of elements to send to each processor 
+     * @param displacementsTempN Integer array. Entry i specifies the displacement (relative to sendbuf from which to take the outgoing data to process i).
+     */
     void ScatterValues(int *sendCountsTempN, int *displacementsTempN);
 };
 

@@ -86,6 +86,20 @@ void ParallelHeatSolver::InitTileVariables()
 }
 ParallelHeatSolver::~ParallelHeatSolver()
 {
+    MPI_Type_free(&MPI_ROW_BLOCK);
+    if (m_rank == 0)
+    {
+        MPI_Type_free(&MPI_COL_MAT_RES);
+    }
+    if (isModeRMA)
+    {
+        MPI_Win_free(&winNewTile);
+        MPI_Win_free(&winTile);
+    }
+
+    //Free block of rows
+    delete[] tile;
+    delete[] newTile;
 }
 
 void ParallelHeatSolver::AddPaddingToArray(float *data, int size, int padding, float *newData)
@@ -112,19 +126,6 @@ void ParallelHeatSolver::AddPaddingToIntArray(int *data, int size, int padding, 
     }
 }
 
-/**
- * Get MPI rank within the communicator.
- * @param [in] comm - actual communicator.
- * @return rank within the comm.
- */
-int ParallelHeatSolver::mpiGetCommRank(const MPI_Comm &comm)
-{
-    int rank = MPI_UNDEFINED;
-
-    MPI_Comm_rank(comm, &rank);
-
-    return rank;
-} // end of mpiGetCommRank
 //-----------------------------
 
 /**
@@ -139,6 +140,14 @@ int ParallelHeatSolver::mpiGetCommSize(const MPI_Comm &comm)
     return size;
 } // end of mpiGetCommSize
 
+/**
+     * @brief Creates and commits new vector type.
+     * @param count Size of vector (number fo elements).
+     * @param stride Vector stride.
+     * @param oldtype Type from which the new type will be created.
+     * @param newtype New desired type vector.
+     * @param size Resized size.
+     */
 void ParallelHeatSolver::CreateResVector(int count, int stride, MPI_Datatype oldtype, MPI_Datatype *newtype, unsigned long size)
 {
     MPI_Datatype tempType;
@@ -146,8 +155,12 @@ void ParallelHeatSolver::CreateResVector(int count, int stride, MPI_Datatype old
     MPI_Type_commit(&tempType);
     MPI_Type_create_resized(tempType, 0, 1 * size, newtype);
     MPI_Type_commit(newtype);
-}
+} // end of CreateResVector
 
+/**
+ * @brief Creates array of m_size filled with offset number at each position (used at Scatter_v).
+ * @param offset Number that will be put at each position.
+ */
 int *ParallelHeatSolver::GetSendCounts(int offset)
 {
     int *sendCounts = new int[m_size];
@@ -156,8 +169,12 @@ int *ParallelHeatSolver::GetSendCounts(int offset)
         sendCounts[i] = offset;
     }
     return sendCounts;
-}
+} // end of GetSendCounts
 
+/**
+     * @brief Counts displacement for each tile taking into account global displacement.
+     * @param n Tile row size.
+     */
 int *ParallelHeatSolver::GetDisplacementCounts(int n)
 {
     int *displacements = new int[m_size];
@@ -173,8 +190,11 @@ int *ParallelHeatSolver::GetDisplacementCounts(int n)
         }
     }
     return displacements;
-}
+} // end of GetDisplacementCounts
 
+/**
+ * @brief Init beggining and end of tile computation according to rank position (left, rigt, top).
+ */
 void ParallelHeatSolver::InitRankOffsets()
 {
 
@@ -207,6 +227,9 @@ void ParallelHeatSolver::InitRankOffsets()
     }
 }
 
+/**
+ * @brief Init information about rank position in the global tile.
+ */
 void ParallelHeatSolver::InitRankProfile()
 {
     rankProfile.isLeftRank = m_rank % globalCols == 0;
@@ -215,6 +238,9 @@ void ParallelHeatSolver::InitRankProfile()
     rankProfile.isBottomRank = m_rank >= m_size - globalCols;
 }
 
+/**
+ * @brief Init values of material arrays (domainParams, domainMap, tempArray) - add padding to them.
+ */
 void ParallelHeatSolver::InitWorkingArrays()
 {
     AddPaddingToArray(m_materialProperties.GetInitTemp().data(), n, padding, m_tempArray.data());
@@ -222,6 +248,9 @@ void ParallelHeatSolver::InitWorkingArrays()
     AddPaddingToIntArray(m_materialProperties.GetDomainMap().data(), n, padding, m_domainMap.data());
 }
 
+/**
+ * @brief Init new types for root rank.
+ */
 void ParallelHeatSolver::InitRootRankTypes()
 {
     CreateResVector(blockRows, tempN, MPI_FLOAT, &MPI_COL_MAT_RES, sizeof(float)); //Create type for one column in matrix (with padding)  of type float
@@ -251,8 +280,13 @@ void ParallelHeatSolver::InitRankTypes()
 
     MPI_Type_commit(&MPI_ROW_BLOCK);
     MPI_Type_commit(&MPI_ROW_MAP);
-}
+} // end of InitRankTypes
 
+/**
+ * @brief Scatter values of working material arrays to all process.
+ * @param sendCountsTempN Integer array specifying the number of elements to send to each processor 
+ * @param displacementsTempN Integer array. Entry i specifies the displacement (relative to sendbuf from which to take the outgoing data to process i).
+ */
 void ParallelHeatSolver::ScatterValues(int *sendCountsTempN, int *displacementsTempN)
 {
 
@@ -267,7 +301,7 @@ void ParallelHeatSolver::ScatterValues(int *sendCountsTempN, int *displacementsT
 
     MPI_Scatterv(m_domainMap.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAP_RES, domainMap, blockCols, MPI_ROW_BLOCK,
                  0, MPI_COMM_WORLD);
-}
+} // end of ScatterValues
 
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &outResult)
 {
@@ -280,11 +314,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     // cout << m_rank << ": isLeftRank:" << isLeftRank << ", rankProfile.isRightRank:" << rankProfile.isRightRank << " >> rankProfile.isTopRank: " << rankProfile.isTopRank << ", rankProfile.isBottomRank:" << rankProfile.isBottomRank << endl;
 
     MPI_Comm MPI_COL_COMM;
-
-    MPI_Win winNewTile;
-    MPI_Win winTile;
     MPI_Win win;
-
     if (isModeRMA)
     {
         MPI_Win_create(newTile, blockRows * blockCols * sizeof(float), sizeof(float), MPI_INFO_NULL, MPI_COMM_WORLD, &winNewTile); // size of tile
@@ -312,17 +342,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     ScatterValues(sendCountsTempN, displacementsTempN);
 
-    // MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, tile, blockCols, MPI_ROW_BLOCK,
-    //              0, MPI_COMM_WORLD);
-
-    // MPI_Scatterv(m_tempArray.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, newTile, blockCols, MPI_ROW_BLOCK,
-    //              0, MPI_COMM_WORLD);
-
-    // MPI_Scatterv(m_domainParams.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAT_RES, domainParams, blockCols, MPI_ROW_BLOCK,
-    //              0, MPI_COMM_WORLD);
-
-    // MPI_Scatterv(m_domainMap.data(), sendCountsTempN, displacementsTempN, MPI_COL_MAP_RES, domainMap, blockCols, MPI_ROW_BLOCK,
-    //              0, MPI_COMM_WORLD);
     //printMatrix(tile, blockCols, blockRows, m_rank);
     //cout << m_rank << ": rankOffsets.startLF:" << rankOffsets.startLF << ", rankOffsets.rankOffsets.endLF:" << rankOffsets.rankOffsets.endLF << " >> rankOffsets.startTB: " << rankOffsets.startTB << ", rankOffsets.endTB:" << rankOffsets.endTB << endl;
 
@@ -443,15 +462,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             MPI_Waitall(4, request, status);
         }
 
-        ComputeMiddleColAvgTemp(
-            globalCols,
-            newTile,
-            tileRows,
-            tileCols,
-            blockRows,
-            &middleColAvgTemp,
-            MPI_COL_COMM,
-            m_rank);
+        ComputeMiddleColAvgTemp(&middleColAvgTemp, MPI_COL_COMM);
 
         if (m_rank == 0)
         {
@@ -476,21 +487,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             std::copy(matrixMM.begin(), matrixMM.end(), outResult.begin());
     }
 
-    MPI_Type_free(&MPI_ROW_BLOCK);
-    if (m_rank == 0)
-    {
-        MPI_Type_free(&MPI_COL_MAT_RES);
-    }
-    if (isModeRMA)
-    {
-        MPI_Win_free(&winNewTile);
-        MPI_Win_free(&winTile);
-    }
-
-    //Free block of rows
-    delete[] tile;
-    delete[] newTile;
-
     // UpdateTile(...) method can be used to evaluate heat equation over 2D tile
     //                 in parallel (using OpenMP).
     // NOTE: This method might be inefficient when used for small tiles such as
@@ -502,7 +498,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     // Finally "PrintFinalReport(...)" should be used to print final elapsed time and
     // average temperature in column.
-}
+} // end of RunSolver
+
 /**
  * Print block of the matrix
  * @param block     - block to print out
@@ -549,15 +546,12 @@ void ParallelHeatSolver::mpiPrintf(int who,
     }
 } // end of mpiPrintf
 
-void ParallelHeatSolver::ComputeMiddleColAvgTemp(
-    int globalCols,
-    float *newTile,
-    int tileRows,
-    int tileCols,
-    int blockRows,
-    float *middleColAvgTemp,
-    const MPI_Comm &comm,
-    int m_rank)
+/**
+ * @brief Compute middle temperature.
+ * @param middleColAvgTemp [OUT] Output middle temperature.
+ * @param comm Comunicator that will be used to compute the middle temperature.
+ */
+void ParallelHeatSolver::ComputeMiddleColAvgTemp(float *middleColAvgTemp, const MPI_Comm &comm)
 {
     float localSum = 0.0f;
     float temperatureSum = 0.0f;
@@ -594,7 +588,7 @@ void ParallelHeatSolver::ComputeMiddleColAvgTemp(
     {
         MPI_Recv(middleColAvgTemp, 1, MPI_FLOAT, middleRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
-}
+} // end of ComputeMiddleColAvgTemp
 
 /**
  * Flush stdout and call barrier to prevent message mixture.
