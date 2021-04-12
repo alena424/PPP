@@ -1,1 +1,6 @@
 build
+scripts
+*.csv
+*.pbs
+cviko
+seq*

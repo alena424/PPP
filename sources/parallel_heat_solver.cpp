@@ -33,6 +33,8 @@ void ParallelHeatSolver::InitTileVariables()
     blockCols = tileCols + 2 * padding; // tile cols with padding from both sides
     blockRows = tileRows + 2 * padding; // tile rows with padding from both sides
     isModeRMA = m_simulationProperties.IsRunParallelRMA();
+    isRunSequential = !m_simulationProperties.IsUseParallelIO();
+    cout << m_rank << ": isRunSequential: " << isRunSequential << endl;
 
     tile = new float[blockRows * blockCols]();    // old tile
     newTile = new float[blockRows * blockCols](); // updated tile used in computation
@@ -43,6 +45,11 @@ void ParallelHeatSolver::InitTileVariables()
 }
 ParallelHeatSolver::~ParallelHeatSolver()
 {
+    if (!m_simulationProperties.GetOutputFileName().empty() && !isRunSequential)
+    {
+        //// Close dataset.
+        H5Dclose(dset_id);
+    }
     MPI_Type_free(&MPI_ROW_BLOCK);
     if (m_rank == 0)
     {
@@ -216,6 +223,7 @@ void ParallelHeatSolver::InitRootRankTypes()
 }
 void ParallelHeatSolver::InitRankTypes()
 {
+
     MPI_Type_vector(blockCols, 2, blockRows, MPI_FLOAT, &MPI_COL_TILE);
     MPI_Type_commit(&MPI_COL_TILE);
 
@@ -276,19 +284,69 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
     m_domainParams.resize(matrixSize);
     m_domainMap.resize(matrixSize);
 
-    // 1. Open output file if its name was specified.
-    AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t)>(nullptr));
-
-    if (!m_simulationProperties.GetOutputFileName().empty())
-        myHandle.Set(H5Fcreate(simulationProps.GetOutputFileName("par").c_str(),
-                               H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT),
-                     H5Fclose);
-
+    //AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t)>(nullptr));
     m_simulationProperties.GetDecompGrid(globalCols, globalRows);
     InitTileVariables();
     InitRankProfile();
     InitRankOffsets();
     InitRankTypes();
+
+    if (!m_simulationProperties.GetOutputFileName().empty())
+    {
+        if (isRunSequential && m_rank == 0)
+        {
+            cout << "creating file" << endl;
+
+            // Open output file if its name was specified.
+            m_fileHandle.Set(H5Fcreate(simulationProps.GetOutputFileName("par").c_str(),
+                                       H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT),
+                             H5Fclose);
+        }
+        if (!isRunSequential)
+        {
+            cout << "heeere" << endl;
+            // Declare an HDF5 file.
+            // hid_t file;
+            hid_t plist;
+            hid_t propertyList = H5Pcreate(H5P_FILE_ACCESS);
+            const char *datasetname = "Dataset-1";
+
+            // Create a property list to open the file using MPI-IO in the MPI_COMM_WORLD communicator.
+            H5Pset_fapl_mpio(propertyList, MPI_COMM_WORLD, MPI_INFO_NULL);
+            mpiPrintf(0, " Creating file... \n");
+            //file = H5Fcreate(simulationProps.GetOutputFileName("par").c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, propertyList);
+            m_fileHandle.Set(H5Fcreate(simulationProps.GetOutputFileName("par").c_str(),
+                                       H5F_ACC_TRUNC, H5P_DEFAULT, propertyList),
+                             H5Fclose);
+            // Close file access list
+            H5Pclose(propertyList);
+
+            //  Create file space - a 2D matrix [n][n]
+            //  Create mem space  - a 2D matrix [tileRows][tileCols] mapped on 1D array lMatrix.
+            hsize_t dimsf[] = {hsize_t(n), hsize_t(n)};
+            hsize_t mem[] = {hsize_t(tileRows), hsize_t(tileCols)};
+            hsize_t datasetRank = 2; // 2d
+            filespace = H5Screate_simple(datasetRank, dimsf, nullptr);
+            memspace = H5Screate_simple(datasetRank, mem, nullptr);
+
+            // Create a dataset
+            mpiPrintf(0, " Creating dataset... \n");
+            dset_id = H5Dcreate(m_fileHandle, datasetname, H5T_NATIVE_FLOAT, filespace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+            // Select a hyperslab to write a local submatrix into the dataset.
+            mpiPrintf(0, " Selecting hyperslab... \n");
+            //mpiGetCommRank(MPI_COMM_WORLD) * lRows * nCols
+            hsize_t start[] = {hsize_t((m_rank / globalCols) * n), m_rank % globalCols};
+            hsize_t count[] = {hsize_t(tileRows), hsize_t(tileCols)}; //lRows * nCols
+            H5Sselect_hyperslab(
+                filespace,
+                H5S_SELECT_SET,
+                start, // kam zapisu
+                nullptr,
+                count, // moje cast
+                nullptr);
+        }
+    }
 
     if (isModeRMA)
     {
@@ -462,6 +520,40 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         }
 
         ComputeMiddleColAvgTemp(&middleColAvgTemp, MPI_COL_COMM);
+        if ((iter % m_simulationProperties.GetDiskWriteIntensity()) == 0)
+        {
+            if (isRunSequential)
+            {
+                cout << "waiting" << endl;
+                MPI_Gatherv(&newTile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
+                if (m_rank == 0 && m_fileHandle != H5I_INVALID_HID)
+                {
+                    // sequential version
+                    StoreDataIntoFile(m_fileHandle, iter, matrixMM.data());
+                }
+            }
+            if (!isRunSequential && m_fileHandle != H5I_INVALID_HID)
+            {
+                // Create XFER property list and set Collective IO.
+                hid_t propertyListXfer = H5Pcreate(H5P_DATASET_XFER);
+
+                // Write data into the dataset
+                H5Pset_dxpl_mpio(propertyListXfer, H5FD_MPIO_COLLECTIVE);
+                mpiPrintf(0, " Writing data... \n");
+                printMatrix(newTile, blockCols, blockRows, m_rank);
+
+                H5Dwrite(
+                    dset_id,
+                    H5T_NATIVE_FLOAT,
+                    memspace,
+                    filespace,
+                    propertyListXfer,
+                    &newTile[2 * blockRows]);
+
+                // 10. Close XREF property list.
+                H5Pclose(propertyListXfer);
+            }
+        }
 
         if (m_rank == 0)
         {

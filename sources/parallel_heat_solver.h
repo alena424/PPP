@@ -77,12 +77,17 @@ protected:
     unsigned int blockCols; // tile cols with padding from both sides
     unsigned int blockRows; // tile rows with padding from both sides
 
+    hid_t dset_id; // dataset id
+    hid_t filespace;
+    hid_t memspace;
+
     float *tile;
     float *newTile;
     int *domainMap;
     float *domainParams;
 
-    bool isModeRMA; // = m_simulationProperties.IsRunParallelRMA()
+    bool isModeRMA;       // = m_simulationProperties.IsRunParallelRMA()
+    bool isRunSequential; // = m_simulationProperties.IsRunSequential()
 
     std::vector<float, AlignedAllocator<float>> m_tempArray;
     std::vector<float, AlignedAllocator<float>> m_domainParams;
