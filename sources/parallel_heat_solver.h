@@ -121,6 +121,10 @@ protected:
     MPI_Datatype MPI_ROW_MAP;
     MPI_Datatype MPI_TILE;
     MPI_Datatype MPI_COL_TILE;
+    MPI_Datatype MPI_GLOBAL_ROW_BLOCK;
+    MPI_Datatype MPI_GLOBAL_ROW_BLOCK_INT;
+    MPI_Datatype MPI_GLOBAL_COL_BLOCK_RES;
+    MPI_Datatype MPI_GLOBAL_COL_BLOCK;
 
     // Windows for RMA mode
     MPI_Win winNewTile;
@@ -213,11 +217,22 @@ protected:
     void InitRankTypes();
 
     /**
+     * @brief Init dataset, memspace, filespace, hd5file for paralel IO.
+     */
+    void InitParallelIO();
+
+    /**
+     * @brief Writes tile data from all ranks to file.
+     */
+    void H5WriteTileToFile();
+
+    /**
      * @brief Scatter values of working material arrays to all process.
      * @param sendCountsTempN Integer array specifying the number of elements to send to each processor 
      * @param displacementsTempN Integer array. Entry i specifies the displacement (relative to sendbuf from which to take the outgoing data to process i).
      */
-    void ScatterValues(int *sendCountsTempN, int *displacementsTempN);
+    void
+    ScatterValues(int *sendCountsTempN, int *displacementsTempN);
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
