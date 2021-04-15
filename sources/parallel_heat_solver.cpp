@@ -324,7 +324,8 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
             //  Create file space - a 2D matrix [n][n]
             //  Create mem space  - a 2D matrix [tileRows][tileCols] mapped on 1D array lMatrix.
             hsize_t dimsf[] = {hsize_t(n), hsize_t(n)};
-            hsize_t mem[] = {hsize_t(tileRows), hsize_t(tileCols)};
+            //hsize_t mem[] = {hsize_t(blockCols), hsize_t(blockRows)};
+            hsize_t mem[] = {hsize_t(blockCols), hsize_t(blockRows)};
             hsize_t datasetRank = 2; // 2d
             filespace = H5Screate_simple(datasetRank, dimsf, nullptr);
             memspace = H5Screate_simple(datasetRank, mem, nullptr);
@@ -336,15 +337,37 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
             // Select a hyperslab to write a local submatrix into the dataset.
             mpiPrintf(0, " Selecting hyperslab... \n");
             //mpiGetCommRank(MPI_COMM_WORLD) * lRows * nCols
-            hsize_t start[] = {hsize_t((m_rank / globalCols) * n), m_rank % globalCols};
+            hsize_t start[] = {hsize_t((m_rank / globalCols) * tileRows), ((m_rank % globalCols) * tileCols)};
+            mpiPrintf(0, "--------------------------------------------------------------------\n");
+            printf("Filespace Rank %2d = [%d, %d]\n", m_rank, ((m_rank / globalCols) * tileRows), ((m_rank % globalCols) * tileCols));
+            // cout << m_rank << ": global index is: [" << ((m_rank / globalCols) * n) << ", " << (m_rank % globalCols * tileCols) << "]" << endl;
+
             hsize_t count[] = {hsize_t(tileRows), hsize_t(tileCols)}; //lRows * nCols
+            //hsize_t count[] = {hsize_t(5), hsize_t(5)}; //lRows * nCols
             H5Sselect_hyperslab(
+
                 filespace,
                 H5S_SELECT_SET,
                 start, // kam zapisu
                 nullptr,
                 count, // moje cast
                 nullptr);
+
+            printf("Memspace Rank %2d = [%d, %d]\n", m_rank, (blockRows), blockCols);
+
+            hsize_t startMem[] = {hsize_t(2), hsize_t(2)};
+            //hsize_t countMem[] = {hsize_t(1), hsize_t(tileRows)};
+            hsize_t countMem[] = {hsize_t(tileCols), hsize_t(tileRows)};
+            //[] = {hsize_t(2), hsize_t(2)};
+
+            //hsize_t blockSize[] = {hsize_t(tileCols), hsize_t(1)};
+            H5Sselect_hyperslab(
+                memspace,
+                H5S_SELECT_SET,
+                startMem, // kam zapisu
+                nullptr,  // stride
+                countMem, // moje cast
+                nullptr); // blockSize
         }
     }
 
@@ -548,7 +571,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                     memspace,
                     filespace,
                     propertyListXfer,
-                    &newTile[2 * blockRows]);
+                    newTile);
 
                 // 10. Close XREF property list.
                 H5Pclose(propertyListXfer);
