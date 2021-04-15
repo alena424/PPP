@@ -333,41 +333,6 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
             // Create a dataset
             mpiPrintf(0, " Creating dataset... \n");
             dset_id = H5Dcreate(m_fileHandle, datasetname, H5T_NATIVE_FLOAT, filespace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-
-            // Select a hyperslab to write a local submatrix into the dataset.
-            mpiPrintf(0, " Selecting hyperslab... \n");
-            //mpiGetCommRank(MPI_COMM_WORLD) * lRows * nCols
-            hsize_t start[] = {hsize_t((m_rank / globalCols) * tileRows), ((m_rank % globalCols) * tileCols)};
-            mpiPrintf(0, "--------------------------------------------------------------------\n");
-            printf("Filespace Rank %2d = [%d, %d]\n", m_rank, ((m_rank / globalCols) * tileRows), ((m_rank % globalCols) * tileCols));
-            // cout << m_rank << ": global index is: [" << ((m_rank / globalCols) * n) << ", " << (m_rank % globalCols * tileCols) << "]" << endl;
-
-            hsize_t count[] = {hsize_t(tileRows), hsize_t(tileCols)}; //lRows * nCols
-            //hsize_t count[] = {hsize_t(5), hsize_t(5)}; //lRows * nCols
-            H5Sselect_hyperslab(
-
-                filespace,
-                H5S_SELECT_SET,
-                start, // kam zapisu
-                nullptr,
-                count, // moje cast
-                nullptr);
-
-            printf("Memspace Rank %2d = [%d, %d]\n", m_rank, (blockRows), blockCols);
-
-            hsize_t startMem[] = {hsize_t(2), hsize_t(2)};
-            //hsize_t countMem[] = {hsize_t(1), hsize_t(tileRows)};
-            hsize_t countMem[] = {hsize_t(tileCols), hsize_t(tileRows)};
-            //[] = {hsize_t(2), hsize_t(2)};
-
-            //hsize_t blockSize[] = {hsize_t(tileCols), hsize_t(1)};
-            H5Sselect_hyperslab(
-                memspace,
-                H5S_SELECT_SET,
-                startMem, // kam zapisu
-                nullptr,  // stride
-                countMem, // moje cast
-                nullptr); // blockSize
         }
     }
 
@@ -565,13 +530,72 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
                 mpiPrintf(0, " Writing data... \n");
                 printMatrix(newTile, blockCols, blockRows, m_rank);
 
-                H5Dwrite(
-                    dset_id,
-                    H5T_NATIVE_FLOAT,
-                    memspace,
-                    filespace,
-                    propertyListXfer,
-                    newTile);
+                // Select a hyperslab to write a local submatrix into the dataset.
+                mpiPrintf(0, " Selecting hyperslab... \n");
+                //mpiGetCommRank(MPI_COMM_WORLD) * lRows * nCols
+                mpiPrintf(0, "--------------------------------------------------------------------\n");
+                printf("Filespace Rank %2d = [%d, %d]\n", m_rank, ((m_rank / globalCols) * tileRows), ((m_rank % globalCols) * tileCols));
+                // cout << m_rank << ": global index is: [" << ((m_rank / globalCols) * n) << ", " << (m_rank % globalCols * tileCols) << "]" << endl;
+
+                //hsize_t count[] = {hsize_t(5), hsize_t(5)}; //lRows * nCols
+                // H5Sselect_hyperslab(
+                //     filespace,
+                //     H5S_SELECT_SET,
+                //     startFile, // kam zapisu
+                //     nullptr,
+                //     countFile, // moje cast
+                //     nullptr);
+
+                // printf("Memspace Rank %2d = [%d, %d]\n", m_rank, (blockRows), blockCols);
+
+                // hsize_t startMem[] = {hsize_t(2), hsize_t(2)};
+                // //hsize_t countMem[] = {hsize_t(1), hsize_t(tileRows)};
+                // hsize_t countMem[] = {hsize_t(tileCols), hsize_t(tileRows)};
+                //[] = {hsize_t(2), hsize_t(2)};
+
+                //hsize_t blockSize[] = {hsize_t(tileCols), hsize_t(1)};
+
+                int startFileCurrent = (m_rank % globalCols) * tileCols;
+                hsize_t startFile[] = {hsize_t((m_rank / globalCols) * tileRows), hsize_t(startFileCurrent)};
+                hsize_t countFile[] = {hsize_t(tileRows), hsize_t(1)}; //lRows * nCols
+
+                int startMemCurrent = 2;
+                hsize_t startMem[] = {hsize_t(startMemCurrent), hsize_t(2)};
+                hsize_t countMem[] = {hsize_t(1), hsize_t(tileRows)};
+                for (int i = 0; i < tileCols; i++)
+                {
+                    // printf("%d Writing filepsace ..start: [%d, %d], count: [%d, %d]\n", m_rank, (m_rank / globalCols) * tileRows, startFileCurrent,
+                    //        tileRows, 1);
+                    H5Sselect_hyperslab(
+                        filespace,
+                        H5S_SELECT_SET,
+                        startFile, // kam zapisu
+                        nullptr,
+                        countFile, // moje cast
+                        nullptr);
+
+                    // printf("%d Writing memspace ..start: [%d, %d], count: [%d, %d]\n", m_rank, startMemCurrent, 2,
+                    //        1, tileRows);
+                    H5Sselect_hyperslab(
+                        memspace,
+                        H5S_SELECT_SET,
+                        startMem, // kam zapisu
+                        nullptr,  // stride
+                        countMem, // moje cast
+                        nullptr); // blockSize
+
+                    H5Dwrite(
+                        dset_id,
+                        H5T_NATIVE_FLOAT,
+                        memspace,
+                        filespace,
+                        propertyListXfer,
+                        newTile);
+                    startMemCurrent = startMemCurrent + 1; // Get to next row
+                    startMem[0] = hsize_t(startMemCurrent);
+                    startFileCurrent++;
+                    startFile[1] = hsize_t(startFileCurrent);
+                }
 
                 // 10. Close XREF property list.
                 H5Pclose(propertyListXfer);
