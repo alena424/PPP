@@ -34,7 +34,6 @@ void ParallelHeatSolver::InitTileVariables()
     blockRows = tileRows + 2 * padding; // tile rows with padding from both sides
     isModeRMA = m_simulationProperties.IsRunParallelRMA();
     isRunSequential = !m_simulationProperties.IsUseParallelIO();
-    cout << m_rank << ": isRunSequential: " << isRunSequential << endl;
 
     tile = new float[blockRows * blockCols]();    // old tile
     newTile = new float[blockRows * blockCols](); // updated tile used in computation
@@ -328,8 +327,6 @@ void ParallelHeatSolver::H5WriteTileToFile()
             countFile, // moje cast
             nullptr);
 
-        // printf("%d Writing memspace ..start: [%d, %d], count: [%d, %d]\n", m_rank, startMemCurrent, 2,
-        //        1, tileRows);
         H5Sselect_hyperslab(
             memspace,
             H5S_SELECT_SET,
@@ -405,7 +402,7 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &outResult)
 {
     float middleColAvgTemp = 0.0f;
-    std::vector<float, AlignedAllocator<float>> matrixMM(n * n); // computed final matrix
+    std::vector<float, AlignedAllocator<float>> matrixFinal(n * n); // computed final matrix
     double startTime = 0.0;
 
     // cout << "griiid globalCols:" << globalCols << ", globalRows:" << globalRows << " >> tileRows: " << tileRows << ", tileCols:" << tileCols << endl;
@@ -565,12 +562,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         {
             if (isRunSequential)
             {
-                cout << "waiting" << endl;
-                MPI_Gatherv(&newTile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
+                MPI_Gatherv(&newTile[2 * blockRows], tileCols, MPI_TILE, matrixFinal.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
                 if (m_rank == 0 && m_fileHandle != H5I_INVALID_HID)
                 {
                     // sequential version
-                    StoreDataIntoFile(m_fileHandle, iter, matrixMM.data());
+                    StoreDataIntoFile(m_fileHandle, iter, matrixFinal.data());
                 }
             }
             if (!isRunSequential && m_fileHandle != H5I_INVALID_HID)
@@ -587,19 +583,18 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         std::swap(tile, newTile);
     }
 
-    MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixMM.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
+    MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixFinal.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
 
-    mpiFlush();
-    mpiPrintf(0, "---------------------------------------------------------------------\n");
-    mpiFlush();
+    // mpiFlush();
+    // mpiPrintf(0, "---------------------------------------------------------------------\n");
+    // mpiFlush();
     if (m_rank == 0)
     {
         // Measure total execution time and report
         double elapsedTime = MPI_Wtime() - startTime;
         PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
-        printMatrix(matrixMM.data(), n, n, m_rank);
-        if (m_simulationProperties.GetNumIterations() & 1)
-            std::copy(matrixMM.begin(), matrixMM.end(), outResult.begin());
+        // printMatrix(matrixFinal.data(), n, n, m_rank);
+        std::copy(matrixFinal.begin(), matrixFinal.end(), outResult.begin());
     }
 
     // UpdateTile(...) method can be used to evaluate heat equation over 2D tile
