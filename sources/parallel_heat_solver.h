@@ -77,7 +77,7 @@ protected:
     unsigned int blockCols; // tile cols with padding from both sides
     unsigned int blockRows; // tile rows with padding from both sides
 
-    hid_t dset_id; // dataset id
+    //hid_t dset_id; // dataset id
     hid_t filespace;
     hid_t memspace;
 
@@ -224,7 +224,7 @@ protected:
     /**
      * @brief Writes tile data from all ranks to file.
      */
-    void H5WriteTileToFile();
+    void H5WriteTileToFile(int iteration);
 
     /**
      * @brief Scatter values of working material arrays to all process.

@@ -44,11 +44,6 @@ void ParallelHeatSolver::InitTileVariables()
 }
 ParallelHeatSolver::~ParallelHeatSolver()
 {
-    if (!m_simulationProperties.GetOutputFileName().empty() && !isRunSequential)
-    {
-        //// Close dataset.
-        H5Dclose(dset_id);
-    }
     MPI_Type_free(&MPI_ROW_BLOCK);
     if (m_rank == 0)
     {
@@ -293,14 +288,12 @@ void ParallelHeatSolver::InitParallelIO()
     hsize_t datasetRank = 2; // 2d
     filespace = H5Screate_simple(datasetRank, dimsf, nullptr);
     memspace = H5Screate_simple(datasetRank, mem, nullptr);
-    // Create a dataset
-    dset_id = H5Dcreate(m_fileHandle, datasetname, H5T_NATIVE_FLOAT, filespace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 }
 
 /**
  * @brief Writes tile data from all ranks to file.
  */
-void ParallelHeatSolver::H5WriteTileToFile()
+void ParallelHeatSolver::H5WriteTileToFile(int iteration)
 {
     // Create XFER property list and set Collective IO.
     hid_t propertyListXfer = H5Pcreate(H5P_DATASET_XFER);
@@ -315,40 +308,86 @@ void ParallelHeatSolver::H5WriteTileToFile()
     int startMemCurrent = padding;
     hsize_t startMem[] = {hsize_t(startMemCurrent), hsize_t(padding)};
     hsize_t countMem[] = {hsize_t(1), hsize_t(tileRows)};
-    for (int i = 0; i < tileCols; i++)
-    {
-        // printf("%d Writing filepsace ..start: [%d, %d], count: [%d, %d]\n", m_rank, (m_rank / globalCols) * tileRows, startFileCurrent,
-        //        tileRows, 1);
-        H5Sselect_hyperslab(
-            filespace,
-            H5S_SELECT_SET,
-            startFile, // kam zapisu
-            nullptr,
-            countFile, // moje cast
-            nullptr);
 
-        H5Sselect_hyperslab(
-            memspace,
-            H5S_SELECT_SET,
-            startMem,
-            nullptr,
-            countMem,
-            nullptr);
+hsize_t gridSize[] = { n, n };
 
-        H5Dwrite(
-            dset_id,
-            H5T_NATIVE_FLOAT,
-            memspace,
-            filespace,
-            propertyListXfer,
-            newTile);
-        startMemCurrent++; // Get to next row
-        startMem[0] = hsize_t(startMemCurrent);
-        startFileCurrent++;
-        startFile[1] = hsize_t(startFileCurrent);
+    // Create new HDF5 file group named as "Timestep_N", where "N" is number
+    //    of current snapshot. The group is placed into root of the file "/Timestep_N".
+    std::string groupName = "Timestep_" + std::to_string(static_cast<unsigned long long>(iteration / m_simulationProperties.GetDiskWriteIntensity()));
+
+	AutoHandle<hid_t> groupHandle(H5Gcreate(m_fileHandle, groupName.c_str(),
+                                            H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Gclose);
+
+ 	{
+        // Create new dataset "/Timestep_N/Temperature" which is simulation-domain
+        //    sized 2D array of "float"s.
+        std::string dataSetName("Temperature");
+        // Define shape of the dataset (2D edgeSize x edgeSize array).
+        AutoHandle<hid_t> dataSpaceHandle(H5Screate_simple(2, gridSize, NULL), H5Sclose);
+        // Create datased with specified shape.
+        AutoHandle<hid_t> dataSetHandle(H5Dcreate(groupHandle, dataSetName.c_str(),
+                                                  H5T_NATIVE_FLOAT, dataSpaceHandle,
+                                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Dclose);
+
+        // Write the data from memory pointed by "data" into new datased.
+        // Note that we are filling whole dataset and therefore we can specify
+        // "H5S_ALL" for both memory and dataset spaces.
+        //H5Dwrite(dataSetHandle, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+
+	  for (int i = 0; i < tileCols; i++)
+	    {
+		// printf("%d Writing filepsace ..start: [%d, %d], count: [%d, %d]\n", m_rank, (m_rank / globalCols) * tileRows, startFileCurrent,
+		//        tileRows, 1);
+		H5Sselect_hyperslab(
+		    filespace,
+		    H5S_SELECT_SET,
+		    startFile, // kam zapisu
+		    nullptr,
+		    countFile, // moje cast
+		    nullptr);
+
+		H5Sselect_hyperslab(
+		    memspace,
+		    H5S_SELECT_SET,
+		    startMem,
+		    nullptr,
+		    countMem,
+		    nullptr);
+
+		H5Dwrite(
+		    dataSetHandle,
+		    H5T_NATIVE_FLOAT,
+		    memspace,
+		    filespace,
+		    propertyListXfer,
+		    newTile);
+		startMemCurrent++; // Get to next row
+		startMem[0] = hsize_t(startMemCurrent);
+		startFileCurrent++;
+		startFile[1] = hsize_t(startFileCurrent);
+	    }
+
+        // NOTE: Both dataset and dataspace will be closed here automatically (due to RAII).
+    	}
+	{
+        // Create Integer attribute in the same group "/Timestep_N/Time"
+        //    in which we store number of current simulation iteration.
+        std::string attributeName("Time");
+
+        //Dataspace is single value/scalar.
+        AutoHandle<hid_t> dataSpaceHandle(H5Screate(H5S_SCALAR), H5Sclose);
+
+        // Create the attribute in the group as double.
+        AutoHandle<hid_t> attributeHandle(H5Acreate2(groupHandle, attributeName.c_str(),
+                                                     H5T_IEEE_F64LE, dataSpaceHandle,
+                                                     H5P_DEFAULT, H5P_DEFAULT), H5Aclose);
+
+        //Write value into the attribute.
+        double snapshotTime = double(iteration);
+        H5Awrite(attributeHandle, H5T_IEEE_F64LE, &snapshotTime);
     }
 
-    // 10. Close XREF property list.
+    // Close XREF property list.
     H5Pclose(propertyListXfer);
 }
 ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
@@ -571,7 +610,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             }
             if (!isRunSequential && m_fileHandle != H5I_INVALID_HID)
             {
-                H5WriteTileToFile();
+                H5WriteTileToFile(iter);
             }
         }
 
