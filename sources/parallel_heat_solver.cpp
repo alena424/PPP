@@ -309,16 +309,17 @@ void ParallelHeatSolver::H5WriteTileToFile(int iteration)
     hsize_t startMem[] = {hsize_t(startMemCurrent), hsize_t(padding)};
     hsize_t countMem[] = {hsize_t(1), hsize_t(tileRows)};
 
-hsize_t gridSize[] = { n, n };
+    hsize_t gridSize[] = {n, n};
 
     // Create new HDF5 file group named as "Timestep_N", where "N" is number
     //    of current snapshot. The group is placed into root of the file "/Timestep_N".
     std::string groupName = "Timestep_" + std::to_string(static_cast<unsigned long long>(iteration / m_simulationProperties.GetDiskWriteIntensity()));
 
-	AutoHandle<hid_t> groupHandle(H5Gcreate(m_fileHandle, groupName.c_str(),
-                                            H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Gclose);
+    AutoHandle<hid_t> groupHandle(H5Gcreate(m_fileHandle, groupName.c_str(),
+                                            H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT),
+                                  H5Gclose);
 
- 	{
+    {
         // Create new dataset "/Timestep_N/Temperature" which is simulation-domain
         //    sized 2D array of "float"s.
         std::string dataSetName("Temperature");
@@ -327,49 +328,46 @@ hsize_t gridSize[] = { n, n };
         // Create datased with specified shape.
         AutoHandle<hid_t> dataSetHandle(H5Dcreate(groupHandle, dataSetName.c_str(),
                                                   H5T_NATIVE_FLOAT, dataSpaceHandle,
-                                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Dclose);
+                                                  H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT),
+                                        H5Dclose);
 
         // Write the data from memory pointed by "data" into new datased.
         // Note that we are filling whole dataset and therefore we can specify
         // "H5S_ALL" for both memory and dataset spaces.
         //H5Dwrite(dataSetHandle, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
 
-	  for (int i = 0; i < tileCols; i++)
-	    {
-		// printf("%d Writing filepsace ..start: [%d, %d], count: [%d, %d]\n", m_rank, (m_rank / globalCols) * tileRows, startFileCurrent,
-		//        tileRows, 1);
-		H5Sselect_hyperslab(
-		    filespace,
-		    H5S_SELECT_SET,
-		    startFile, // kam zapisu
-		    nullptr,
-		    countFile, // moje cast
-		    nullptr);
+        for (int i = 0; i < tileCols; i++)
+        {
+            H5Sselect_hyperslab(
+                filespace,
+                H5S_SELECT_SET,
+                startFile, // kam zapisu
+                nullptr,
+                countFile, // moje cast
+                nullptr);
 
-		H5Sselect_hyperslab(
-		    memspace,
-		    H5S_SELECT_SET,
-		    startMem,
-		    nullptr,
-		    countMem,
-		    nullptr);
+            H5Sselect_hyperslab(
+                memspace,
+                H5S_SELECT_SET,
+                startMem,
+                nullptr,
+                countMem,
+                nullptr);
 
-		H5Dwrite(
-		    dataSetHandle,
-		    H5T_NATIVE_FLOAT,
-		    memspace,
-		    filespace,
-		    propertyListXfer,
-		    newTile);
-		startMemCurrent++; // Get to next row
-		startMem[0] = hsize_t(startMemCurrent);
-		startFileCurrent++;
-		startFile[1] = hsize_t(startFileCurrent);
-	    }
-
-        // NOTE: Both dataset and dataspace will be closed here automatically (due to RAII).
-    	}
-	{
+            H5Dwrite(
+                dataSetHandle,
+                H5T_NATIVE_FLOAT,
+                memspace,
+                filespace,
+                propertyListXfer,
+                newTile);
+            startMemCurrent++; // Get to next row
+            startMem[0] = hsize_t(startMemCurrent);
+            startFileCurrent++;
+            startFile[1] = hsize_t(startFileCurrent);
+        }
+    }
+    {
         // Create Integer attribute in the same group "/Timestep_N/Time"
         //    in which we store number of current simulation iteration.
         std::string attributeName("Time");
@@ -380,7 +378,8 @@ hsize_t gridSize[] = { n, n };
         // Create the attribute in the group as double.
         AutoHandle<hid_t> attributeHandle(H5Acreate2(groupHandle, attributeName.c_str(),
                                                      H5T_IEEE_F64LE, dataSpaceHandle,
-                                                     H5P_DEFAULT, H5P_DEFAULT), H5Aclose);
+                                                     H5P_DEFAULT, H5P_DEFAULT),
+                                          H5Aclose);
 
         //Write value into the attribute.
         double snapshotTime = double(iteration);
@@ -444,10 +443,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
     std::vector<float, AlignedAllocator<float>> matrixFinal(n * n); // computed final matrix
     double startTime = 0.0;
 
-    // cout << "griiid globalCols:" << globalCols << ", globalRows:" << globalRows << " >> tileRows: " << tileRows << ", tileCols:" << tileCols << endl;
-    // cout << "griiid blockCols:" << blockCols << ", blockRows:" << blockRows << " >> tempN: " << tempN << ", n:" << n << endl;
-    // cout << m_rank << ": isLeftRank:" << isLeftRank << ", rankProfile.isRightRank:" << rankProfile.isRightRank << " >> rankProfile.isTopRank: " << rankProfile.isTopRank << ", rankProfile.isBottomRank:" << rankProfile.isBottomRank << endl;
-
     MPI_Comm MPI_COL_COMM; // Comunicator for counting middle average temperature.
     MPI_Win win;           // local window that will be used as winNewTile or winTile depending on number of iteration
 
@@ -472,11 +467,10 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     ScatterValues(sendCountsTempN, displacementsTempN);
 
-    //printMatrix(tile, blockCols, blockRows, m_rank);
-    //cout << m_rank << ": rankOffsets.startLF:" << rankOffsets.startLF << ", rankOffsets.rankOffsets.endLF:" << rankOffsets.rankOffsets.endLF << " >> rankOffsets.startTB: " << rankOffsets.startTB << ", rankOffsets.endTB:" << rankOffsets.endTB << endl;
-
+    bool temperature_computed = false; // flag if in this iteration temperature was computed
     for (size_t iter = 0; iter < m_simulationProperties.GetNumIterations(); ++iter)
     {
+        temperature_computed = false;
         MPI_Request request[4];
         MPI_Status status[4];
         // Compute only borders
@@ -485,7 +479,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
         {
             UpdateTile(tile, newTile, domainParams, domainMap, rankOffsets.startLF, 2, rankOffsets.endLF - rankOffsets.startLF, 2, blockRows,
                        m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
-            //printMatrix(newTile, blockCols, blockRows, m_rank);
         }
         // Compute right border
         if (!rankProfile.isRightRank)
@@ -493,7 +486,6 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             //Count right border
             UpdateTile(tile, newTile, domainParams, domainMap, rankOffsets.startLF, blockCols - 4, rankOffsets.endLF - rankOffsets.startLF, 2, blockRows,
                        m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp());
-            //printMatrix(newTile, blockCols, blockRows, m_rank);
         }
         // Compute bottom border
         if (!rankProfile.isBottomRank)
@@ -596,7 +588,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
             MPI_Waitall(4, request, status);
         }
 
-        ComputeMiddleColAvgTemp(&middleColAvgTemp, MPI_COL_COMM);
+        if (ShouldPrintProgress(iter))
+        {
+            ComputeMiddleColAvgTemp(&middleColAvgTemp, MPI_COL_COMM);
+            temperature_computed = true;
+        }
         if ((iter % m_simulationProperties.GetDiskWriteIntensity()) == 0)
         {
             if (isRunSequential)
@@ -624,23 +620,17 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float>> &
 
     MPI_Gatherv(&tile[2 * blockRows], tileCols, MPI_TILE, matrixFinal.data(), sendCountsN, displacementsN, MPI_COL_TILE_N_RES, 0, MPI_COMM_WORLD);
 
-    // mpiFlush();
-    // mpiPrintf(0, "---------------------------------------------------------------------\n");
-    // mpiFlush();
+    if (!temperature_computed)
+    {
+        ComputeMiddleColAvgTemp(&middleColAvgTemp, MPI_COL_COMM);
+    }
     if (m_rank == 0)
     {
         // Measure total execution time and report
         double elapsedTime = MPI_Wtime() - startTime;
         PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
-        // printMatrix(matrixFinal.data(), n, n, m_rank);
         std::copy(matrixFinal.begin(), matrixFinal.end(), outResult.begin());
     }
-
-    // UpdateTile(...) method can be used to evaluate heat equation over 2D tile
-    //                 in parallel (using OpenMP).
-    // NOTE: This method might be inefficient when used for small tiles such as
-    //       2xN or Nx2 (these might arise at edges of the tile)
-    //       In this case ComputePoint may be called directly in loop.
 
 } // end of RunSolver
 
